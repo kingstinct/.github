@@ -1,0 +1,89 @@
+name: 'CapRover Setup'
+description: 'Sets up a CapRover app for PR deployments'
+
+inputs:
+  caprover-url:
+    description: 'CapRover server URL'
+    required: true
+  caprover-password:
+    description: 'CapRover password'
+    required: true
+  caprover-app:
+    description: 'CapRover app name'
+    required: true
+  env-vars:
+    description: 'JSON array of environment variables to set'
+    required: false
+    default: '[]'
+  container-http-port:
+    description: 'Container HTTP port'
+    required: false
+    default: '3000'
+  websocket-support:
+    description: 'Enable WebSocket support'
+    required: false
+    default: 'true'
+  instance-count:
+    description: 'Number of instances'
+    required: false
+    default: '1'
+  enable-ssl:
+    description: 'Enable SSL on base domain'
+    required: false
+    default: 'true'
+  discord-webhook:
+    description: 'Discord webhook for failure notifications'
+    required: false
+    default: ''
+  bun-version:
+    description: 'Bun version to use'
+    required: false
+    default: '1.3.8'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: ${{ inputs.bun-version }}
+
+    - name: Create CapRover App
+      shell: bash
+      run: |
+        bunx caprover api \
+          --path=/user/apps/appDefinitions/register \
+          --method=POST \
+          --data='{"appName":"${{ inputs.caprover-app }}","hasPersistentData":false}' || true
+      env:
+        CAPROVER_URL: ${{ inputs.caprover-url }}
+        CAPROVER_PASSWORD: ${{ inputs.caprover-password }}
+
+    - name: Update App Settings
+      shell: bash
+      run: |
+        bunx caprover api \
+          --path=/user/apps/appDefinitions/update \
+          --method=POST \
+          --data='{"appName":"${{ inputs.caprover-app }}","websocketSupport":${{ inputs.websocket-support }},"containerHttpPort":${{ inputs.container-http-port }},"instanceCount":${{ inputs.instance-count }},"envVars":${{ inputs.env-vars }}}'
+      env:
+        CAPROVER_URL: ${{ inputs.caprover-url }}
+        CAPROVER_PASSWORD: ${{ inputs.caprover-password }}
+
+    - name: Enable SSL
+      if: ${{ inputs.enable-ssl == 'true' }}
+      shell: bash
+      run: |
+        bunx caprover api \
+          --path=/user/apps/appDefinitions/enablebasedomainssl \
+          --method=POST \
+          --data='{"appName":"${{ inputs.caprover-app }}"}'
+      env:
+        CAPROVER_URL: ${{ inputs.caprover-url }}
+        CAPROVER_PASSWORD: ${{ inputs.caprover-password }}
+
+    - name: Notify on failure
+      uses: sarisia/actions-status-discord@v1
+      if: ${{ failure() && inputs.discord-webhook != '' }}
+      with:
+        webhook: ${{ inputs.discord-webhook }}
