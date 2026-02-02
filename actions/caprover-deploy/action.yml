@@ -1,0 +1,51 @@
+name: 'CapRover Deploy'
+description: 'Deploys a Docker image to CapRover'
+
+inputs:
+  caprover-url:
+    description: 'CapRover server URL'
+    required: true
+  caprover-password:
+    description: 'CapRover password'
+    required: true
+  caprover-app:
+    description: 'CapRover app name'
+    required: true
+  image-name:
+    description: 'Docker image to deploy'
+    required: true
+  bun-version:
+    description: 'Bun version to use'
+    required: false
+    default: '1.3.8'
+
+outputs:
+  deploy-started-at:
+    description: 'Timestamp when deployment started'
+    value: ${{ steps.deploy-time.outputs.deployStartedAt }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Capture deploy started at
+      id: deploy-time
+      shell: bash
+      run: echo "deployStartedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: ${{ inputs.bun-version }}
+
+    - name: Install dependencies
+      shell: bash
+      run: bun install --frozen-lockfile
+
+    - name: Deploy to CapRover
+      shell: bash
+      run: bunx caprover deploy
+      env:
+        CAPROVER_URL: ${{ inputs.caprover-url }}
+        CAPROVER_PASSWORD: ${{ inputs.caprover-password }}
+        CAPROVER_IMAGE_NAME: ${{ inputs.image-name }}
+        CAPROVER_APP: ${{ inputs.caprover-app }}

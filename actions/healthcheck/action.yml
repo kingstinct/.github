@@ -1,0 +1,37 @@
+name: 'Health Check'
+description: 'Checks the health of a deployed service'
+
+inputs:
+  url:
+    description: 'URL to check'
+    required: true
+  max-attempts:
+    description: 'Maximum number of attempts'
+    required: false
+    default: '24'
+  retry-delay:
+    description: 'Delay between retries'
+    required: false
+    default: '5s'
+  discord-webhook:
+    description: 'Discord webhook for failure notifications'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check the deployed service URL
+      uses: jtalk/url-health-check-action@v4
+      with:
+        url: ${{ inputs.url }}
+        max-attempts: ${{ inputs.max-attempts }}
+        retry-delay: ${{ inputs.retry-delay }}
+        retry-all: true
+
+    - name: Notify on failure
+      uses: sarisia/actions-status-discord@v1
+      if: ${{ failure() && inputs.discord-webhook != '' }}
+      with:
+        webhook: ${{ inputs.discord-webhook }}
+        url: ${{ inputs.url }}

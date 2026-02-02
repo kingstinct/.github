@@ -1,0 +1,70 @@
+name: 'Docker Build and Push'
+description: 'Builds a Docker image and pushes it to GitHub Container Registry'
+
+inputs:
+  github-token:
+    description: 'GitHub token for authenticating with GHCR'
+    required: true
+  image-name:
+    description: 'Docker image name (defaults to repository name)'
+    required: false
+    default: ''
+  build-args:
+    description: 'Build arguments to pass to Docker'
+    required: false
+    default: ''
+  context:
+    description: 'Docker build context'
+    required: false
+    default: '.'
+  dockerfile:
+    description: 'Path to Dockerfile'
+    required: false
+    default: 'Dockerfile'
+
+outputs:
+  image-tag:
+    description: 'The full image tag that was pushed'
+    value: ${{ steps.meta.outputs.tags }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Log in to the Container registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.github-token }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Extract image name
+      id: image-name
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.image-name }}" ]; then
+          echo "name=${{ inputs.image-name }}" >> $GITHUB_OUTPUT
+        else
+          echo "name=ghcr.io/${{ github.repository }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        push: true
+        context: ${{ inputs.context }}
+        file: ${{ inputs.dockerfile }}
+        build-args: ${{ inputs.build-args }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        tags: |
+          ${{ steps.image-name.outputs.name }}:latest
+          ${{ steps.image-name.outputs.name }}:${{ github.sha }}
+
+    - name: Output image info
+      id: meta
+      shell: bash
+      run: |
+        echo "tags=${{ steps.image-name.outputs.name }}:${{ github.sha }}" >> $GITHUB_OUTPUT
