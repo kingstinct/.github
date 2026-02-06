@@ -7,7 +7,7 @@
   "metadata": {
     "description": "Curated Claude Code skills marketplace featuring Expo, React Native, SQL, and document processing tools",
     "version": "1.0.0",
-    "pluginRoot": "./skills/plugins"
+    "pluginRoot": "./"
   },
   "plugins": [
     {
@@ -57,7 +57,7 @@
     },
     {
       "name": "kysely-sql",
-      "source": "./kysely-sql",
+      "source": "./skills/plugins/kysely-sql",
       "description": "SQL database guidelines using Kysely query builder with expo-sqlite or bun:sqlite drivers.",
       "author": {
         "name": "Kingstinct",
@@ -69,7 +69,7 @@
     },
     {
       "name": "planning",
-      "source": "./planning",
+      "source": "./skills/plugins/planning",
       "description": "Concise MVP-style planning with issue context gathering and integration/E2E test strategies.",
       "author": {
         "name": "Kingstinct",
@@ -81,7 +81,7 @@
     },
     {
       "name": "typescript",
-      "source": "./typescript",
+      "source": "./skills/plugins/typescript",
       "description": "TypeScript best practices with typecheck hook on file changes.",
       "author": {
         "name": "Kingstinct",
@@ -93,7 +93,7 @@
     },
     {
       "name": "biome",
-      "source": "./biome",
+      "source": "./skills/plugins/biome",
       "description": "Auto-format and lint with Biome on file changes.",
       "author": {
         "name": "Kingstinct",
@@ -105,7 +105,7 @@
     },
     {
       "name": "general",
-      "source": "./general",
+      "source": "./skills/plugins/general",
       "description": "Git commands (/commit, /push, /amend), Linear integration, and Pushover notifications.",
       "author": {
         "name": "Kingstinct",
@@ -117,7 +117,7 @@
     },
     {
       "name": "bun",
-      "source": "./bun",
+      "source": "./skills/plugins/bun",
       "description": "Bun environment setup on session start: installs correct version and runs codegen if available.",
       "author": {
         "name": "Kingstinct",
