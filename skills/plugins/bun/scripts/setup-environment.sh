@@ -34,11 +34,6 @@ if [ -z "$BUN_VERSION" ] && [ -f "$PROJECT_DIR/.env.github" ]; then
   fi
 fi
 
-# 4. Check if already set in environment
-if [ -z "$BUN_VERSION" ] && [ -n "${BUN_VERSION:-}" ]; then
-  echo "🌍 Using BUN_VERSION from environment: $BUN_VERSION"
-fi
-
 check_bun_not_installed() {
   if command -v bun >/dev/null 2>&1; then
     local installed
