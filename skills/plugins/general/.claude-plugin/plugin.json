@@ -1,0 +1,59 @@
+{
+  "name": "general",
+  "description": "General workflows: git commands, Linear integration, and Pushover notifications",
+  "version": "1.0.0",
+  "author": {
+    "name": "Kingstinct",
+    "email": "robert@kingstinct.com"
+  },
+  "commands": "../commands",
+  "mcpServers": {
+    "linear": {
+      "type": "http",
+      "url": "https://mcp.linear.app/mcp"
+    },
+    "sentry": {
+      "type": "http",
+      "url": "https://mcp.sentry.dev/mcp"
+    },
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
+    }
+  },
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "MESSAGE=\"Claude Code is waiting for your input 💻\" \"${CLAUDE_PLUGIN_ROOT}/scripts/pushover-notification.sh\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/git-branch-context.sh\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "MESSAGE=\"Claude Code is done! ✅\" \"${CLAUDE_PLUGIN_ROOT}/scripts/pushover-notification.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

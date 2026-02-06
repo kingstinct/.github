@@ -1,0 +1,9 @@
+{
+  "name": "kysely-sql",
+  "description": "SQL database guidelines using Kysely query builder with expo-sqlite or bun:sqlite drivers",
+  "version": "1.0.0",
+  "author": {
+    "name": "Kingstinct",
+    "email": "robert@kingstinct.com"
+  }
+}

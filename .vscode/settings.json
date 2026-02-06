@@ -1,0 +1,6 @@
+{
+    "search.exclude": {
+        "**/skill": false,
+        "**/skills": false
+    },
+}

@@ -1,0 +1,34 @@
+{
+  "name": "planning",
+  "description": "Concise MVP-style planning with issue context gathering and clear test strategies",
+  "version": "1.0.0",
+  "author": {
+    "name": "Kingstinct",
+    "email": "robert@kingstinct.com"
+  },
+  "allowedTools": [
+    "Bash(gh issue:*)",
+    "Bash(gh pr:*)",
+    "Bash(gh api:*)",
+    "Bash(gh repo:*)",
+    "Bash(gh run:*)",
+    "Bash(gh workflow:*)",
+    "mcp__linear__*",
+    "mcp__sentry__*",
+    "mcp__github__*"
+  ],
+  "mcpServers": {
+    "linear": {
+      "type": "http",
+      "url": "https://mcp.linear.app/mcp"
+    },
+    "sentry": {
+      "type": "http",
+      "url": "https://mcp.sentry.dev/mcp"
+    },
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/"
+    }
+  }
+}
