@@ -1,0 +1,22 @@
+{
+  "name": "bun",
+  "description": "Bun environment setup: auto-install correct version and run codegen on session start",
+  "version": "1.0.0",
+  "author": {
+    "name": "Kingstinct",
+    "email": "robert@kingstinct.com"
+  },
+    "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/setup-environment.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "biome",
+  "description": "Auto-format and lint with Biome on file changes",
+  "version": "1.0.0",
+  "author": {
+    "name": "Kingstinct",
+    "email": "robert@kingstinct.com"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git add $CLAUDE_PROJECT_DIR && bunx biome check --fix --unsafe --staged --no-errors-on-unmatched && git add $CLAUDE_PROJECT_DIR"
+          }
+        ]
+      }
+    ]
+  }
+}

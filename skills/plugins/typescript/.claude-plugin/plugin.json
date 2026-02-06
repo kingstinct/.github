@@ -1,0 +1,22 @@
+{
+  "name": "typescript",
+  "description": "TypeScript best practices: strict typing, type narrowing, and functional patterns",
+  "version": "1.0.0",
+  "author": {
+    "name": "Kingstinct",
+    "email": "robert@kingstinct.com"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run typecheck"
+          }
+        ]
+      }
+    ]
+  }
+}

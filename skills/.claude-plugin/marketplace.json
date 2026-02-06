@@ -1,0 +1,131 @@
+{
+  "name": "kingstinct-skills",
+  "owner": {
+    "name": "Kingstinct",
+    "email": "robert@kingstinct.com"
+  },
+  "metadata": {
+    "description": "Curated Claude Code skills marketplace featuring Expo, React Native, SQL, and document processing tools",
+    "version": "1.0.0",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "expo-skills",
+      "source": {
+        "source": "github",
+        "repo": "expo/skills"
+      },
+      "description": "Official Expo skills: app design, SDK upgrades, and deployment to App Store/Play Store/web.",
+      "author": {
+        "name": "Expo Team",
+        "email": "bacon@expo.io"
+      },
+      "category": "development",
+      "tags": ["expo", "react-native", "mobile", "deployment", "upgrade"],
+      "license": "MIT"
+    },
+    {
+      "name": "callstack-skills",
+      "source": {
+        "source": "github",
+        "repo": "callstackincubator/agent-skills"
+      },
+      "description": "React Native best practices, performance optimization, and GitHub workflows by Callstack.",
+      "author": {
+        "name": "Callstack",
+        "email": "hello@callstack.com"
+      },
+      "category": "development",
+      "tags": ["react-native", "performance", "optimization", "github", "best-practices"],
+      "license": "MIT"
+    },
+    {
+      "name": "anthropic-skills",
+      "source": {
+        "source": "github",
+        "repo": "anthropics/skills"
+      },
+      "description": "Document processing (Excel, Word, PowerPoint, PDF) and example skills (design, MCP builder, web artifacts).",
+      "author": {
+        "name": "Anthropic",
+        "email": "klazuka@anthropic.com"
+      },
+      "category": "productivity",
+      "tags": ["documents", "excel", "word", "pdf", "design", "mcp"],
+      "license": "MIT"
+    },
+    {
+      "name": "kysely-sql",
+      "source": "./kysely-sql",
+      "description": "SQL database guidelines using Kysely query builder with expo-sqlite or bun:sqlite drivers.",
+      "author": {
+        "name": "Kingstinct",
+        "email": "robert@kingstinct.com"
+      },
+      "category": "development",
+      "tags": ["sql", "sqlite", "kysely", "expo", "bun", "database"],
+      "license": "MIT"
+    },
+    {
+      "name": "planning",
+      "source": "./planning",
+      "description": "Concise MVP-style planning with issue context gathering and integration/E2E test strategies.",
+      "author": {
+        "name": "Kingstinct",
+        "email": "robert@kingstinct.com"
+      },
+      "category": "workflow",
+      "tags": ["planning", "mvp", "testing", "e2e", "integration"],
+      "license": "MIT"
+    },
+    {
+      "name": "typescript",
+      "source": "./typescript",
+      "description": "TypeScript best practices with typecheck hook on file changes.",
+      "author": {
+        "name": "Kingstinct",
+        "email": "robert@kingstinct.com"
+      },
+      "category": "development",
+      "tags": ["typescript", "types", "strict", "functional"],
+      "license": "MIT"
+    },
+    {
+      "name": "biome",
+      "source": "./biome",
+      "description": "Auto-format and lint with Biome on file changes.",
+      "author": {
+        "name": "Kingstinct",
+        "email": "robert@kingstinct.com"
+      },
+      "category": "development",
+      "tags": ["biome", "linting", "formatting", "code-quality"],
+      "license": "MIT"
+    },
+    {
+      "name": "general",
+      "source": "./general",
+      "description": "Git commands (/commit, /push, /amend), Linear integration, and Pushover notifications.",
+      "author": {
+        "name": "Kingstinct",
+        "email": "robert@kingstinct.com"
+      },
+      "category": "workflow",
+      "tags": ["git", "linear", "notifications", "pushover", "workflow"],
+      "license": "MIT"
+    },
+    {
+      "name": "bun",
+      "source": "./bun",
+      "description": "Bun environment setup on session start: installs correct version and runs codegen if available.",
+      "author": {
+        "name": "Kingstinct",
+        "email": "robert@kingstinct.com"
+      },
+      "category": "development",
+      "tags": ["bun", "setup", "codegen", "environment"],
+      "license": "MIT"
+    }
+  ]
+}

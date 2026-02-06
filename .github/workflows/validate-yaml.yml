@@ -1,0 +1,34 @@
+name: Validate YAML and GitHub Actions
+
+on:
+  push:
+    paths:
+      - '**/*.yml'
+      - '**/*.yaml'
+  pull_request:
+    paths:
+      - '**/*.yml'
+      - '**/*.yaml'
+
+jobs:
+  yamllint:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint YAML files
+        run: yamllint -d relaxed .
+
+  actionlint:
+    name: GitHub Actions Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint
+        run: |
+          bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+
+      - name: Lint GitHub Actions workflows
+        run: ./actionlint -color
