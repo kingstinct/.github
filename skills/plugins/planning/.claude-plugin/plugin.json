@@ -6,17 +6,6 @@
     "name": "Kingstinct",
     "email": "robert@kingstinct.com"
   },
-  "allowedTools": [
-    "Bash(gh issue:*)",
-    "Bash(gh pr:*)",
-    "Bash(gh api:*)",
-    "Bash(gh repo:*)",
-    "Bash(gh run:*)",
-    "Bash(gh workflow:*)",
-    "mcp__linear__*",
-    "mcp__sentry__*",
-    "mcp__github__*"
-  ],
   "mcpServers": {
     "linear": {
       "type": "http",

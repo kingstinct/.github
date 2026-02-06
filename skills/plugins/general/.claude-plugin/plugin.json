@@ -6,7 +6,12 @@
     "name": "Kingstinct",
     "email": "robert@kingstinct.com"
   },
-  "commands": "../commands",
+  "commands": [
+    "./commands/amend.md",
+    "./commands/commit.md",
+    "./commands/push.md",
+    "./commands/start-linear-task.md"
+  ],
   "mcpServers": {
     "linear": {
       "type": "http",

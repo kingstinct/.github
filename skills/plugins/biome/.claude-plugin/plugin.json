@@ -6,11 +6,6 @@
     "name": "Kingstinct",
     "email": "robert@kingstinct.com"
   },
-  "allowedTools": [
-    "Bash(biome:*)",
-    "Bash(bunx biome:*)",
-    "Bash(bun run biome:*)"
-  ],
   "hooks": {
     "PostToolUse": [
       {

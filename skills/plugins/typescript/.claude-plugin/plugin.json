@@ -6,12 +6,6 @@
     "name": "Kingstinct",
     "email": "robert@kingstinct.com"
   },
-  "allowedTools": [
-    "Bash(tsc:*)",
-    "Bash(bun run tsc:*)",
-    "Bash(bunx tsc:*)",
-    "Bash(bun run typecheck:*)"
-  ],
   "hooks": {
     "PostToolUse": [
       {
