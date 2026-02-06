@@ -204,6 +204,54 @@ const validUsers: User[] = users.filter(isNonNull);
 const broken = users.filter(u => u != null); // Still (User | null)[]
 ```
 
+## Avoid Meaningless Try/Catch
+
+Don't wrap code in try/catch unless you're actually handling the error meaningfully:
+
+```typescript
+// Bad - catching just to rethrow or log
+try {
+  await saveUser(user);
+} catch (error) {
+  console.error(error);
+  throw error;
+}
+
+// Bad - swallowing errors silently
+try {
+  await saveUser(user);
+} catch {
+  // silent failure
+}
+
+// Good - let errors propagate naturally
+await saveUser(user);
+
+// Good - actual error handling with recovery or transformation
+try {
+  await saveUser(user);
+} catch (error) {
+  if (error instanceof DuplicateEmailError) {
+    return { success: false, message: 'Email already exists' };
+  }
+  throw error; // rethrow unknown errors
+}
+
+// Good - cleanup with finally (but consider using `using` instead)
+const connection = await getConnection();
+try {
+  await connection.query(sql);
+} finally {
+  await connection.release();
+}
+```
+
+Only use try/catch when you:
+- Transform the error into a user-facing result
+- Recover from specific error types
+- Need cleanup logic (prefer `using` keyword when available)
+- Are at a boundary where you must not let errors escape
+
 ## Functional Programming
 
 Prefer functional patterns:
