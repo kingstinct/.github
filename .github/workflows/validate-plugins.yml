@@ -3,10 +3,22 @@ name: Validate Claude Code Plugins
 on:
   push:
     paths:
-      - 'skills/**'
+      - '.claude-plugin/**'
+      - 'biome/**'
+      - 'bun/**'
+      - 'general/**'
+      - 'kysely-sql/**'
+      - 'planning/**'
+      - 'typescript/**'
   pull_request:
     paths:
-      - 'skills/**'
+      - '.claude-plugin/**'
+      - 'biome/**'
+      - 'bun/**'
+      - 'general/**'
+      - 'kysely-sql/**'
+      - 'planning/**'
+      - 'typescript/**'
 
 jobs:
   validate:
@@ -18,11 +30,11 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Validate marketplace
-        run: claude plugin validate skills/
+        run: claude plugin validate .
 
       - name: Validate individual plugins
         run: |
-          for plugin in skills/plugins/*/; do
+          for plugin in biome bun general kysely-sql planning typescript; do
             echo "=== Validating $plugin ==="
             claude plugin validate "$plugin"
           done
