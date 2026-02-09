@@ -125,6 +125,20 @@
       "category": "development",
       "tags": ["bun", "setup", "codegen", "environment"],
       "license": "MIT"
+    },
+    {
+      "name": "ralph",
+      "source": {
+        "source": "github",
+        "repo": "snarktank/ralph"
+      },
+      "description": "Ralph Wiggum - Long-running AI agent loop for autonomous multi-iteration task completion.",
+      "author": {
+        "name": "Snarktank"
+      },
+      "category": "workflow",
+      "tags": ["automation", "agent", "loop", "autonomous", "ralph"],
+      "license": "MIT"
     }
   ]
 }

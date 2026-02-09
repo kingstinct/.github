@@ -10,6 +10,12 @@ if [ -f "$SCRIPT_DIR/../.env.github" ]; then
   export $(grep -v '^#' "$SCRIPT_DIR/../.env.github" | xargs)
 fi
 
+# Skip notifications when running inside ralph loop (unless explicitly called by ralph)
+if [ "${RALPH_LOOP:-}" = "true" ] && [ -z "${RALPH_NOTIFY:-}" ]; then
+  echo "⏭️ Skipping notification (inside ralph loop)"
+  exit 0
+fi
+
 # Check if required environment variables are set
 if [ -z "${PUSHOVER_API_TOKEN:-}" ] || [ -z "${PUSHOVER_USER_KEY:-}" ]; then
   echo "⚠️ Pushover credentials not configured. Skipping notification."
