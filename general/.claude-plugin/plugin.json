@@ -10,7 +10,6 @@
     "./commands/amend.md",
     "./commands/commit.md",
     "./commands/push.md",
-    "./commands/ralph-loop.md",
     "./commands/start-linear-task.md"
   ],
   "mcpServers": {

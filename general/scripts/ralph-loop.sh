@@ -1,6 +1,26 @@
 #!/bin/bash
 # Ralph Wiggum - Long-running AI agent loop
-# Usage: ralph-loop.sh [--tool amp|claude] [max_iterations]
+# Usage: ralph-loop [--tool amp|claude] [max_iterations]
+#
+# INSTALLATION:
+# Add this to your ~/.zshrc (or ~/.bashrc):
+#
+#   export PATH="$HOME/.claude/plugins/kingstinct-skills/general/scripts:$PATH"
+#
+# Or create a symlink:
+#
+#   ln -s ~/.claude/plugins/kingstinct-skills/general/scripts/ralph-loop.sh /usr/local/bin/ralph-loop
+#
+# REQUIREMENTS:
+# - Create a scripts/ralph/ directory in your project with:
+#   - CLAUDE.md - The prompt for Claude Code iterations
+#   - prd.json - Product requirements (optional, for branch tracking)
+#
+# EXAMPLES:
+#   ralph-loop.sh              # Run with defaults (claude, 10 iterations)
+#   ralph-loop.sh 20           # Run with 20 max iterations
+#   ralph-loop.sh --tool amp   # Use amp instead of claude
+#   ralph-loop.sh --tool claude 15
 
 set -e
 
