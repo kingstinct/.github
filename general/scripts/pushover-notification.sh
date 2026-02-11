@@ -30,9 +30,12 @@ fi
 
 TITLE="${TITLE:-Claude Code}"
 
+# Get current directory basename for context
+CURRENT_DIR="$(basename "$PWD")"
+
 # Determine message based on whether running remotely
 if [ "${CLAUDE_CODE_REMOTE:-}" = "true" ]; then
-  MESSAGE="${MESSAGE:-Open Claude Code session}"
+  MESSAGE="${MESSAGE:-Open Claude Code session in $CURRENT_DIR}"
   URL="https://claude.ai/code"
   URL_TITLE="Open Claude"
 
@@ -45,7 +48,7 @@ if [ "${CLAUDE_CODE_REMOTE:-}" = "true" ]; then
     -F "title=$TITLE" \
     https://api.pushover.net/1/messages.json
 else
-  MESSAGE="${MESSAGE:-Claude Code is done! Time to return from coffee break}"
+  MESSAGE="${MESSAGE:-Claude Code is done in $CURRENT_DIR! Time to return from coffee break}"
 
   curl -s \
     -F "token=$PUSHOVER_API_TOKEN" \

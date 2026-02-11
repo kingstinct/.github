@@ -1,7 +1,7 @@
 {
   "name": "general",
   "description": "General workflows: git commands, Linear integration, and Pushover notifications",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "author": {
     "name": "Kingstinct",
     "email": "robert@kingstinct.com"
