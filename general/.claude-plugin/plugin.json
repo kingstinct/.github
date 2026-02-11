@@ -1,7 +1,7 @@
 {
   "name": "general",
-  "description": "General workflows: git commands, Linear integration, and Pushover notifications",
-  "version": "1.1.2",
+  "description": "General workflows: git commands, Linear integration, Pushover notifications, and specialized subagents",
+  "version": "1.2.1",
   "author": {
     "name": "Kingstinct",
     "email": "robert@kingstinct.com"
@@ -11,6 +11,13 @@
     "./commands/commit.md",
     "./commands/push.md",
     "./commands/start-linear-task.md"
+  ],
+  "agents": [
+    "./agents/code-reviewer.md",
+    "./agents/debugger.md",
+    "./agents/data-scientist.md",
+    "./agents/db-reader.md",
+    "./agents/code-janitor.md"
   ],
   "mcpServers": {
     "linear": {

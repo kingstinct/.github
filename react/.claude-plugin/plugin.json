@@ -1,0 +1,9 @@
+{
+  "name": "react",
+  "description": "React best practices: lean hooks, component patterns, and performance optimization",
+  "version": "1.0.0",
+  "author": {
+    "name": "Kingstinct",
+    "email": "robert@kingstinct.com"
+  }
+}
