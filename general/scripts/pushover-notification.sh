@@ -16,6 +16,12 @@ if [ "${RALPH_LOOP:-}" = "true" ] && [ -z "${RALPH_NOTIFY:-}" ]; then
   exit 0
 fi
 
+# If DISABLE_PUSHOVER_NOTIFICATIONS is set to "true" or "1", skip sending.
+if [ "${DISABLE_PUSHOVER_NOTIFICATIONS:-}" = "true" ] || [ "${DISABLE_PUSHOVER_NOTIFICATIONS:-}" = "1" ]; then
+  echo "ℹ️  Pushover notifications disabled via DISABLE_PUSHOVER_NOTIFICATIONS; skipping."
+  exit 0
+fi
+
 # Check if required environment variables are set
 if [ -z "${PUSHOVER_API_TOKEN:-}" ] || [ -z "${PUSHOVER_USER_KEY:-}" ]; then
   echo "⚠️ Pushover credentials not configured. Skipping notification."
