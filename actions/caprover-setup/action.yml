@@ -62,14 +62,16 @@ runs:
     - name: Update App Settings
       shell: bash
       run: |
-        # Build JSON payload using jq to properly handle multiline values in env vars
-        PAYLOAD=$(jq -n \
+        # Escape newlines in ENV_VARS (handles multiline secrets like PEM keys)
+        ENV_VARS_ESCAPED=$(printf '%s' "$ENV_VARS" | jq -Rsa 'gsub("\n"; "\\n") | fromjson')
+
+        PAYLOAD=$(jq -nc \
           --arg appName "$APP_NAME" \
           --argjson websocketSupport "$WEBSOCKET_SUPPORT" \
           --argjson containerHttpPort "$CONTAINER_HTTP_PORT" \
           --argjson instanceCount "$INSTANCE_COUNT" \
-          --argjson envVars "$ENV_VARS" \
-          '{appName: $appName, websocketSupport: $websocketSupport, containerHttpPort: $containerHttpPort, instanceCount: $instanceCount, envVars: $envVars}')
+          --argjson envVars "$ENV_VARS_ESCAPED" \
+          '$ARGS.named')
 
         bunx caprover api \
           --path=/user/apps/appDefinitions/update \
