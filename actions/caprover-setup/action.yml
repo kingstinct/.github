@@ -62,13 +62,27 @@ runs:
     - name: Update App Settings
       shell: bash
       run: |
+        # Build JSON payload using jq to properly handle multiline values in env vars
+        PAYLOAD=$(jq -n \
+          --arg appName "$APP_NAME" \
+          --argjson websocketSupport "$WEBSOCKET_SUPPORT" \
+          --argjson containerHttpPort "$CONTAINER_HTTP_PORT" \
+          --argjson instanceCount "$INSTANCE_COUNT" \
+          --argjson envVars "$ENV_VARS" \
+          '{appName: $appName, websocketSupport: $websocketSupport, containerHttpPort: $containerHttpPort, instanceCount: $instanceCount, envVars: $envVars}')
+
         bunx caprover api \
           --path=/user/apps/appDefinitions/update \
           --method=POST \
-          --data='{"appName":"${{ inputs.caprover-app }}","websocketSupport":${{ inputs.websocket-support }},"containerHttpPort":${{ inputs.container-http-port }},"instanceCount":${{ inputs.instance-count }},"envVars":${{ inputs.env-vars }}}'
+          --data="$PAYLOAD"
       env:
         CAPROVER_URL: ${{ inputs.caprover-url }}
         CAPROVER_PASSWORD: ${{ inputs.caprover-password }}
+        APP_NAME: ${{ inputs.caprover-app }}
+        WEBSOCKET_SUPPORT: ${{ inputs.websocket-support }}
+        CONTAINER_HTTP_PORT: ${{ inputs.container-http-port }}
+        INSTANCE_COUNT: ${{ inputs.instance-count }}
+        ENV_VARS: ${{ inputs.env-vars }}
 
     - name: Enable SSL
       if: ${{ inputs.enable-ssl == 'true' }}
