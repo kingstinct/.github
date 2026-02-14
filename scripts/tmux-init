@@ -1,0 +1,7 @@
+#!/bin/bash
+# tmux-init - Create or attach to a tmux session
+# Usage: tmux-init <session-name>
+
+SESSION_NAME="${1:-main}"
+
+tmux new-session -A -s "$SESSION_NAME"
