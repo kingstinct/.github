@@ -17,7 +17,8 @@
     "./agents/debugger.md",
     "./agents/data-scientist.md",
     "./agents/db-reader.md",
-    "./agents/code-janitor.md"
+    "./agents/code-janitor.md",
+    "./agents/docs-updater.md"
   ],
   "mcpServers": {
     "linear": {
