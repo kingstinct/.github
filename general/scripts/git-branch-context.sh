@@ -32,4 +32,9 @@ $LOG
 
 EOF
 
+# Save current HEAD as session start commit for docs-updater
+SESSION_FILE="/tmp/claude-session-start-commit-$$"
+git rev-parse HEAD 2>/dev/null > "$SESSION_FILE" || true
+echo "$SESSION_FILE" > /tmp/claude-session-file-path
+
 exit 0
