@@ -118,8 +118,9 @@ fi
 
 echo "Starting Ralph - Tool: $TOOL - Max iterations: $MAX_ITERATIONS"
 
-# Export RALPH_LOOP to suppress notifications in child processes
-export DISABLE_PUSHOVER_NOTIFICATION=true
+# Export to suppress notifications in child processes
+export DISABLE_PUSHOVER_NOTIFICATIONS=true
+export RALPH_LOOP=true
 
 for i in $(seq 1 $MAX_ITERATIONS); do
   echo ""
@@ -164,10 +165,10 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     echo "Ralph completed all tasks!"
     echo "Completed at iteration $i of $MAX_ITERATIONS"
 
-    # Send completion notification (RALPH_NOTIFY bypasses the loop check)
+    # Send completion notification (unset both vars to allow notification)
     if [ -f "$KINGSTINCT_PLUGIN_DIR/scripts/pushover-notification.sh" ]; then
-      unset DISABLE_PUSHOVER_NOTIFICATION
-      MESSAGE="Ralph completed all tasks! ✅ (iteration $i/ in $(basename "$PROJECT_DIR")$MAX_ITERATIONS)" "$KINGSTINCT_PLUGIN_DIR/scripts/pushover-notification.sh"
+      unset DISABLE_PUSHOVER_NOTIFICATIONS RALPH_LOOP
+      MESSAGE="Ralph completed all tasks! ✅ (iteration $i/$MAX_ITERATIONS in $(basename "$PROJECT_DIR"))" "$KINGSTINCT_PLUGIN_DIR/scripts/pushover-notification.sh"
     fi
     exit 0
   fi
@@ -180,10 +181,10 @@ echo ""
 echo "Ralph reached max iterations ($MAX_ITERATIONS) without completing all tasks."
 echo "Check $PROGRESS_FILE for status."
 
-# Send notification about max iterations reached (RALPH_NOTIFY bypasses the loop check)
+# Send notification about max iterations reached (unset both vars to allow notification)
 if [ -f "$KINGSTINCT_PLUGIN_DIR/scripts/pushover-notification.sh" ]; then
-  unset DISABLE_PUSHOVER_NOTIFICATION
-  MESSAGE="Ralph reached max iterations ($MAX_ITERATIONS) ⚠️" "$KINGSTINCT_PLUGIN_DIR/scripts/pushover-notification.sh"
+  unset DISABLE_PUSHOVER_NOTIFICATIONS RALPH_LOOP
+  MESSAGE="Ralph reached max iterations ($MAX_ITERATIONS) in $(basename "$PROJECT_DIR") ⚠️" "$KINGSTINCT_PLUGIN_DIR/scripts/pushover-notification.sh"
 fi
 exit 1
 pushover-notification
