@@ -1,7 +1,7 @@
 {
   "name": "biome",
   "description": "Auto-format and lint with Biome on file changes",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": {
     "name": "Kingstinct",
     "email": "robert@kingstinct.com"
@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bunx biome check"
+            "command": "bunx biome check --fix"
           }
         ]
       }
