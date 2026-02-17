@@ -9,7 +9,9 @@ on:
       - 'general/**'
       - 'kysely-sql/**'
       - 'planning/**'
+      - 'react/**'
       - 'typescript/**'
+      - 'scripts/**'
   pull_request:
     paths:
       - '.claude-plugin/**'
@@ -18,13 +20,21 @@ on:
       - 'general/**'
       - 'kysely-sql/**'
       - 'planning/**'
+      - 'react/**'
       - 'typescript/**'
+      - 'scripts/**'
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Validate marketplace completeness
+        run: bun run scripts/validate-marketplace.ts
 
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
@@ -34,7 +44,7 @@ jobs:
 
       - name: Validate individual plugins
         run: |
-          for plugin in biome bun general kysely-sql planning typescript; do
+          for plugin in biome bun general kysely-sql planning react typescript; do
             echo "=== Validating $plugin ==="
             claude plugin validate "$plugin"
           done

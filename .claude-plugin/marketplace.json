@@ -127,6 +127,18 @@
       "license": "MIT"
     },
     {
+      "name": "react",
+      "source": "./react",
+      "description": "React best practices: lean hooks, component patterns, and performance optimization.",
+      "author": {
+        "name": "Kingstinct",
+        "email": "robert@kingstinct.com"
+      },
+      "category": "development",
+      "tags": ["react", "hooks", "components", "performance", "best-practices"],
+      "license": "MIT"
+    },
+    {
       "name": "ralph",
       "source": {
         "source": "github",
