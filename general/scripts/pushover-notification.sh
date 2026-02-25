@@ -28,7 +28,8 @@ if [ -z "${PUSHOVER_API_TOKEN:-}" ] || [ -z "${PUSHOVER_USER_KEY:-}" ]; then
   exit 0
 fi
 
-TITLE="${TITLE:-Claude Code}"
+MACHINE_NAME="$(hostname -s)"
+TITLE="${TITLE:-Claude Code ($MACHINE_NAME)}"
 
 # Get current directory basename for context
 CURRENT_DIR="$(basename "$PWD")"
