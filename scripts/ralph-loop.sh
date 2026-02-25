@@ -14,7 +14,7 @@
 # REQUIREMENTS:
 # - Create a scripts/ralph/ directory in your project with:
 #   - CLAUDE.md - The prompt for Claude Code iterations
-#   - prd.json - Product requirements (optional, for branch tracking)
+#   - prd.json - Product requirements (optional)
 #
 # EXAMPLES:
 #   ralph-loop.sh              # Run with defaults (claude, 10 iterations)
@@ -71,50 +71,24 @@ KINGSTINCT_PLUGIN_DIR="$HOME/.claude/plugins/cache/kingstinct-skills/general/1.1
 PRD_FILE="$RALPH_DIR/prd.json"
 PROGRESS_FILE="$RALPH_DIR/progress.txt"
 ARCHIVE_DIR="$RALPH_DIR/archive"
-LAST_BRANCH_FILE="$RALPH_DIR/.last-branch"
-
 # Ensure ralph directory exists
 mkdir -p "$RALPH_DIR"
 
-# Archive previous run if branch changed
-if [ -f "$PRD_FILE" ] && [ -f "$LAST_BRANCH_FILE" ]; then
-  CURRENT_BRANCH=$(jq -r '.branchName // empty' "$PRD_FILE" 2>/dev/null || echo "")
-  LAST_BRANCH=$(cat "$LAST_BRANCH_FILE" 2>/dev/null || echo "")
+# Archive previous run if progress file exists
+if [ -f "$PROGRESS_FILE" ]; then
+  DATE=$(date +%Y-%m-%d-%H%M%S)
+  ARCHIVE_FOLDER="$ARCHIVE_DIR/$DATE"
 
-  if [ -n "$CURRENT_BRANCH" ] && [ -n "$LAST_BRANCH" ] && [ "$CURRENT_BRANCH" != "$LAST_BRANCH" ]; then
-    # Archive the previous run
-    DATE=$(date +%Y-%m-%d)
-    # Strip "ralph/" prefix from branch name for folder
-    FOLDER_NAME=$(echo "$LAST_BRANCH" | sed 's|^ralph/||')
-    ARCHIVE_FOLDER="$ARCHIVE_DIR/$DATE-$FOLDER_NAME"
-
-    echo "Archiving previous run: $LAST_BRANCH"
-    mkdir -p "$ARCHIVE_FOLDER"
-    [ -f "$PRD_FILE" ] && cp "$PRD_FILE" "$ARCHIVE_FOLDER/"
-    [ -f "$PROGRESS_FILE" ] && cp "$PROGRESS_FILE" "$ARCHIVE_FOLDER/"
-    echo "   Archived to: $ARCHIVE_FOLDER"
-
-    # Reset progress file for new run
-    echo "# Ralph Progress Log" > "$PROGRESS_FILE"
-    echo "Started: $(date)" >> "$PROGRESS_FILE"
-    echo "---" >> "$PROGRESS_FILE"
-  fi
+  echo "Archiving previous run to: $ARCHIVE_FOLDER"
+  mkdir -p "$ARCHIVE_FOLDER"
+  [ -f "$PRD_FILE" ] && cp "$PRD_FILE" "$ARCHIVE_FOLDER/"
+  cp "$PROGRESS_FILE" "$ARCHIVE_FOLDER/"
 fi
 
-# Track current branch
-if [ -f "$PRD_FILE" ]; then
-  CURRENT_BRANCH=$(jq -r '.branchName // empty' "$PRD_FILE" 2>/dev/null || echo "")
-  if [ -n "$CURRENT_BRANCH" ]; then
-    echo "$CURRENT_BRANCH" > "$LAST_BRANCH_FILE"
-  fi
-fi
-
-# Initialize progress file if it doesn't exist
-if [ ! -f "$PROGRESS_FILE" ]; then
-  echo "# Ralph Progress Log" > "$PROGRESS_FILE"
-  echo "Started: $(date)" >> "$PROGRESS_FILE"
-  echo "---" >> "$PROGRESS_FILE"
-fi
+# Start fresh progress file
+echo "# Ralph Progress Log" > "$PROGRESS_FILE"
+echo "Started: $(date)" >> "$PROGRESS_FILE"
+echo "---" >> "$PROGRESS_FILE"
 
 echo "Starting Ralph - Tool: $TOOL - Max iterations: $MAX_ITERATIONS"
 
