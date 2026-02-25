@@ -4,19 +4,29 @@
 #
 # Workflow:
 # 1. Setup: detect Linear team + project (single Claude call)
-# 2. Start task: fetch next issue, mark in progress, create branch, generate prd.json (single Claude call)
-# 3. Run ralph-loop.sh to execute the PRD
-# 4. Finalize: push branch and create GitHub PR (single Claude call)
-# 5. Repeat
+# 2. Check for "In Review" issues with new PR reviews (prioritized)
+# 3. If no reviews: fetch next "Todo" issue, mark in progress, create branch, generate prd.json
+# 4. Run ralph-loop.sh to execute the PRD
+# 5. Finalize: push branch and create GitHub PR (single Claude call)
+# 6. Repeat
 
 set -euo pipefail
 
+# Ensure Ctrl-C kills the entire process tree
+trap 'echo ""; echo "Interrupted. Cleaning up..."; kill 0; exit 130' INT TERM
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SETTINGS_DIR="$SCRIPT_DIR/.afk-linear"
-SETTINGS_FILE="$SETTINGS_DIR/settings.json"
 POLL_INTERVAL=60
 TOOL="claude"
 MAX_ITERATIONS=50
+
+# Timestamped logging
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+log_err() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
+}
 
 # Extract the first valid JSON object from mixed text (handles multiline, nested braces)
 extract_json_object() {
@@ -72,6 +82,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Settings directory lives in the working directory (pwd), not the script directory
+SETTINGS_DIR="$(pwd)/.continuous-linear-loop"
+SETTINGS_FILE="$SETTINGS_DIR/settings.json"
+
 # --- Helpers ---
 
 get_setting() {
@@ -90,13 +104,13 @@ save_settings() {
   "workingDirectory": "$work_dir"
 }
 EOF
-  echo "Settings saved to $SETTINGS_FILE"
+  log "Settings saved to $SETTINGS_FILE"
 }
 
 # --- Claude Call 1: Setup (detect team + project in one call) ---
 
 setup_linear() {
-  echo "Detecting Linear team and project..." >&2
+  log_err "[setup] Detecting Linear team and project..."
   local result
   result=$(claude --dangerously-skip-permissions --print -p "Use the Linear MCP tools to:
 1. List all teams (mcp__claude_ai_Linear__list_teams)
@@ -109,7 +123,8 @@ If there is only one team, auto-select it.
 If there are multiple teams, pick the first one.
 If there is only one project, auto-select it.
 If there are multiple projects, pick the first one.
-No other text." 2>/dev/null) || true
+No other text." 2>&1 | tee /dev/stderr) || true
+  log_err "[setup] Claude returned. Extracting JSON..."
 
   local json
   json=$(echo "$result" | extract_json_object) || true
@@ -132,7 +147,7 @@ ensure_settings() {
 
   # Self-repair: detect team/project if missing
   if [ -z "$TEAM_ID" ] || [ -z "$PROJECT_ID" ]; then
-    echo "Settings incomplete. Running setup..."
+    log "Settings incomplete. Running setup..."
     local setup_json
     setup_json=$(setup_linear)
     if [ -n "$setup_json" ]; then
@@ -141,15 +156,15 @@ ensure_settings() {
       local team_name project_name
       team_name=$(echo "$setup_json" | jq -r '.teamName // "unknown"')
       project_name=$(echo "$setup_json" | jq -r '.projectName // "unknown"')
-      echo "Team: $team_name ($TEAM_ID)"
-      echo "Project: $project_name ($PROJECT_ID)"
+      log "Team: $team_name ($TEAM_ID)"
+      log "Project: $project_name ($PROJECT_ID)"
     fi
   fi
 
   # Self-repair: fix working directory if missing or relative
   if [ -z "$WORK_DIR" ] || [[ "$WORK_DIR" != /* ]]; then
     WORK_DIR="$(pwd)"
-    echo "Working directory set to: $WORK_DIR"
+    log "Working directory set to: $WORK_DIR"
   fi
 
   save_settings "$TEAM_ID" "$PROJECT_ID" "$WORK_DIR"
@@ -158,10 +173,11 @@ ensure_settings() {
 ensure_main_branch() {
   local work_dir="$1"
   cd "$work_dir"
-  echo "Ensuring main branch is up-to-date..."
+  log "[git] Ensuring main branch is up-to-date..."
+  log "[git] Current branch: $(git branch --show-current)"
   git checkout main 2>/dev/null || git checkout master
   git pull --ff-only
-  echo "On $(git branch --show-current), up-to-date."
+  log "[git] On $(git branch --show-current), latest: $(git log -1 --format='%h %s')"
 }
 
 # --- Claude Call 2: Start task (fetch issue + mark in progress + create branch + generate prd.json) ---
@@ -172,7 +188,8 @@ start_task() {
   local project_id="${3:-}"
   local ralph_dir="$work_dir/scripts/ralph"
 
-  echo "Fetching and starting next task..." >&2
+  log_err "[start-task] Fetching next 'Todo' task..."
+  log_err "[start-task] Team: $team_id, Project: ${project_id:-<none>}"
 
   local project_filter=""
   if [ -n "$project_id" ]; then
@@ -180,6 +197,7 @@ start_task() {
   fi
 
   mkdir -p "$ralph_dir"
+  log_err "[start-task] Querying Linear for 'Todo' issues with 'prd' label..."
 
   local result
   result=$(cd "$work_dir" && claude --dangerously-skip-permissions --print -p "Do the following steps in order:
@@ -189,13 +207,15 @@ start_task() {
 2. If no issues are found, respond with exactly: NO_ISSUES_FOUND
 
 3. If an issue is found:
-   a. Use the Linear MCP to update that issue's status to 'In Progress'
-   b. Use the /ralph skill to convert the issue into prd.json format and save it to $ralph_dir/prd.json
-   c. Return ONLY a JSON object with these fields:
-      {\"id\": \"...\", \"identifier\": \"...\", \"title\": \"...\", \"description\": \"...\", \"branchName\": \"...\", \"url\": \"...\"}
+   a. Use the Linear MCP to get the issue details including its branchName (the Linear-recommended git branch name)
+   b. Use the Linear MCP to update that issue's status to 'In Progress'
+   c. Use the /ralph skill to convert the issue into prd.json format and save it to $ralph_dir/prd.json. Use the Linear branchName for the branchName field in prd.json.
+   d. Return ONLY a JSON object with these fields:
+      {\"id\": \"...\", \"identifier\": \"...\", \"title\": \"...\", \"description\": \"...\", \"branchName\": \"<the Linear-recommended branch name>\", \"url\": \"...\"}
       No other text after the JSON." 2>&1 | tee /dev/stderr) || true
 
   if echo "$result" | grep -q "NO_ISSUES_FOUND"; then
+    log_err "[start-task] No 'Todo' issues found in Linear."
     return 1
   fi
 
@@ -204,14 +224,26 @@ start_task() {
   json=$(echo "$result" | extract_json_object) || true
 
   if [ -z "$json" ]; then
+    log_err "[start-task] ERROR: Could not extract issue JSON from Claude response."
     return 1
   fi
 
+  local parsed_id parsed_title parsed_branch
+  parsed_id=$(echo "$json" | jq -r '.identifier // .id')
+  parsed_title=$(echo "$json" | jq -r '.title // ""')
+  parsed_branch=$(echo "$json" | jq -r '.branchName // ""')
+  log_err "[start-task] Issue found: $parsed_id - $parsed_title"
+  log_err "[start-task] Branch name: $parsed_branch"
+
   # Verify prd.json was created
   if [ ! -f "$ralph_dir/prd.json" ]; then
-    echo "WARNING: prd.json was not generated at $ralph_dir/prd.json" >&2
+    log_err "[start-task] ERROR: prd.json was not generated at $ralph_dir/prd.json"
     return 1
   fi
+
+  log_err "[start-task] prd.json generated successfully."
+  log_err "[start-task] PRD contents:"
+  jq '.' "$ralph_dir/prd.json" >&2 2>/dev/null || cat "$ralph_dir/prd.json" >&2
 
   echo "$json"
   return 0
@@ -238,14 +270,17 @@ finalize_task() {
     status_label="draft (incomplete)"
   fi
 
-  echo "Creating $status_label PR for $issue_id..."
+  log_err "[finalize] Creating $status_label PR for $issue_id: $issue_title"
+  log_err "[finalize] Linear URL: $issue_url"
 
   cd "$work_dir"
 
   # Push the branch
   local branch
   branch=$(git branch --show-current)
+  log_err "[finalize] Pushing branch $branch to origin..."
   git push -u origin "$branch" 2>/dev/null || git push origin "$branch"
+  log_err "[finalize] Branch pushed. Invoking Claude to create PR..."
 
   claude --dangerously-skip-permissions --print -p "Create a GitHub PR for the current branch using the gh CLI.
 
@@ -259,7 +294,384 @@ In the PR body include:
 
 Use a HEREDOC for the body to ensure correct formatting." 2>&1 | tee /dev/stderr || true
 
-  echo "PR created for $issue_id."
+  log_err "[finalize] PR created for $issue_id."
+}
+
+# --- Review Handling: Check "In Review" issues for new PR feedback ---
+
+# Check if a PR has new human comments since the last commit
+# Checks: review comments (inline), issue comments (top-level), and review bodies
+# Returns 0 if there are new comments, 1 otherwise
+# Outputs the PR number on success
+check_pr_has_new_human_comments() {
+  local work_dir="$1"
+  local branch_name="$2"
+
+  cd "$work_dir"
+
+  # Find the PR for this branch
+  log_err "  [review-check] Looking for PR with head branch: $branch_name"
+  local pr_number
+  pr_number=$(gh pr list --head "$branch_name" --json number --jq '.[0].number' 2>/dev/null) || true
+  if [ -z "$pr_number" ]; then
+    log_err "  [review-check] No PR found for branch $branch_name"
+    return 1
+  fi
+  log_err "  [review-check] Found PR #$pr_number for branch $branch_name"
+
+  # Get the latest commit date on the branch
+  local latest_commit_date
+  latest_commit_date=$(git log -1 --format="%aI" "origin/$branch_name" 2>/dev/null) || true
+  if [ -z "$latest_commit_date" ]; then
+    log_err "  [review-check] Could not determine latest commit date for origin/$branch_name"
+    return 1
+  fi
+  log_err "  [review-check] Latest commit on origin/$branch_name: $latest_commit_date"
+
+  # Check inline review comments for new human comments
+  local new_review_comments
+  new_review_comments=$(gh api "repos/{owner}/{repo}/pulls/$pr_number/comments" --jq "
+    [.[] | select(
+      .user.login != \"copilot\" and
+      .user.login != \"github-actions[bot]\" and
+      .user.type != \"Bot\" and
+      .created_at > \"$latest_commit_date\"
+    )] | length
+  " 2>/dev/null) || true
+  log_err "  [review-check] New human inline comments: ${new_review_comments:-0}"
+
+  # Check top-level issue comments
+  local new_issue_comments
+  new_issue_comments=$(gh api "repos/{owner}/{repo}/issues/$pr_number/comments" --jq "
+    [.[] | select(
+      .user.login != \"copilot\" and
+      .user.login != \"github-actions[bot]\" and
+      .user.type != \"Bot\" and
+      .created_at > \"$latest_commit_date\"
+    )] | length
+  " 2>/dev/null) || true
+  log_err "  [review-check] New human top-level comments: ${new_issue_comments:-0}"
+
+  # Check review submissions with body text
+  local new_reviews
+  new_reviews=$(gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" --jq "
+    [.[] | select(
+      .user.login != \"copilot\" and
+      .user.login != \"github-actions[bot]\" and
+      .user.type != \"Bot\" and
+      .body != null and .body != \"\" and
+      .submitted_at > \"$latest_commit_date\"
+    )] | length
+  " 2>/dev/null) || true
+  log_err "  [review-check] New human review submissions: ${new_reviews:-0}"
+
+  local total=$(( ${new_review_comments:-0} + ${new_issue_comments:-0} + ${new_reviews:-0} ))
+  log_err "  [review-check] Total new human comments: $total"
+
+  if [ "$total" -gt 0 ]; then
+    echo "$pr_number"
+    return 0
+  fi
+  return 1
+}
+
+# Fetch all non-resolved, non-outdated PR comments for review context
+get_pr_review_comments() {
+  local work_dir="$1"
+  local pr_number="$2"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  cd "$work_dir"
+
+  log_err "  [comments] Fetching review comments for PR #$pr_number..."
+
+  # Get review comments (inline code comments) - non-outdated only
+  gh api "repos/{owner}/{repo}/pulls/$pr_number/comments" --jq '
+    [.[] | select(.position != null or .line != null) | {
+      author: .user.login,
+      path: .path,
+      line: (.line // .original_line),
+      body: .body,
+      created_at: .created_at
+    }]
+  ' > "$tmpdir/review_comments.json" 2>/dev/null || echo "[]" > "$tmpdir/review_comments.json"
+
+  local rc_count
+  rc_count=$(jq 'length' "$tmpdir/review_comments.json" 2>/dev/null || echo 0)
+  log_err "  [comments] Inline review comments (non-outdated): $rc_count"
+
+  # Get issue comments (top-level PR comments)
+  gh api "repos/{owner}/{repo}/issues/$pr_number/comments" --jq '
+    [.[] | {
+      author: .user.login,
+      body: .body,
+      created_at: .created_at
+    }]
+  ' > "$tmpdir/issue_comments.json" 2>/dev/null || echo "[]" > "$tmpdir/issue_comments.json"
+
+  local ic_count
+  ic_count=$(jq 'length' "$tmpdir/issue_comments.json" 2>/dev/null || echo 0)
+  log_err "  [comments] Top-level PR comments: $ic_count"
+
+  # Get PR reviews with body text
+  gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" --jq '
+    [.[] | select(.body != null and .body != "") | {
+      author: .user.login,
+      state: .state,
+      body: .body,
+      created_at: .submitted_at
+    }]
+  ' > "$tmpdir/reviews.json" 2>/dev/null || echo "[]" > "$tmpdir/reviews.json"
+
+  local rv_count
+  rv_count=$(jq 'length' "$tmpdir/reviews.json" 2>/dev/null || echo 0)
+  log_err "  [comments] Review bodies with text: $rv_count"
+  log_err "  [comments] Total comments collected: $((rc_count + ic_count + rv_count))"
+
+  # Combine into a single JSON object
+  python3 -c "
+import json
+rc = json.load(open('$tmpdir/review_comments.json'))
+ic = json.load(open('$tmpdir/issue_comments.json'))
+rv = json.load(open('$tmpdir/reviews.json'))
+print(json.dumps({
+  'review_comments': rc,
+  'issue_comments': ic,
+  'reviews': rv
+}, indent=2))
+"
+
+  rm -rf "$tmpdir"
+}
+
+# Find "In Review" Linear issues that have new PR reviews
+# Returns issue JSON on success, 1 on failure
+check_review_tasks() {
+  local team_id="$1"
+  local work_dir="$2"
+  local project_id="${3:-}"
+
+  log_err "[review] Checking for 'In Review'/'In Progress' issues with new PR feedback..."
+  log_err "[review] Team: $team_id, Project: ${project_id:-<none>}"
+
+  local project_filter=""
+  if [ -n "$project_id" ]; then
+    project_filter=" in project ID '$project_id'"
+  fi
+
+  # Use Claude to fetch "In Review" or "In Progress" issues from Linear
+  log_err "[review] Querying Linear for review-candidate issues with 'prd' label..."
+  local result
+  result=$(cd "$work_dir" && claude --dangerously-skip-permissions --print -p "I need to find Linear issues that might have PR reviews to address. Do these steps and explain what you find at each step:
+
+1. List all issues for team '$team_id'${project_filter} that have the label 'prd'. Do NOT filter by status yet - get ALL prd-labeled issues regardless of status.
+
+2. From the results, show me what statuses the issues have (print each issue's identifier, title, and status name).
+
+3. Filter to only issues whose status indicates they are in progress or in review (e.g. 'In Review', 'Review', 'In Progress', 'in review', 'Code Review', or any status containing 'review' or 'progress' case-insensitively).
+
+4. For each matching issue, get its branchName from Linear.
+
+5. If no matching issues are found after filtering, respond with exactly: NO_ISSUES_FOUND
+
+6. If issues are found, return a JSON array of objects with these fields:
+{\"id\": \"...\", \"identifier\": \"...\", \"title\": \"...\", \"description\": \"...\", \"branchName\": \"<Linear branchName>\", \"url\": \"...\"}
+Return the JSON as the very last thing in your response." 2>&1 | tee /dev/stderr) || true
+  log_err "[review] Claude returned. Parsing response..."
+
+  if echo "$result" | grep -q "NO_ISSUES_FOUND"; then
+    log_err "[review] No 'In Review'/'In Progress' issues found in Linear."
+    return 1
+  fi
+
+  # Try to extract a JSON array, fall back to single object
+  local issues
+  issues=$(echo "$result" | python3 -c "
+import sys, json
+text = sys.stdin.read()
+# Try to find a JSON array
+depth = 0
+start = None
+for i, ch in enumerate(text):
+    if ch == '[' and depth == 0:
+        start = i
+        depth = 1
+    elif ch in '[{':
+        depth += 1
+    elif ch in ']}' and depth > 0:
+        depth -= 1
+        if depth == 0 and start is not None:
+            candidate = text[start:i+1]
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, list):
+                    print(json.dumps(parsed))
+                    sys.exit(0)
+            except json.JSONDecodeError:
+                start = None
+                continue
+sys.exit(1)
+" 2>/dev/null) || true
+
+  # Fall back to single object wrapped in array
+  if [ -z "$issues" ]; then
+    local single
+    single=$(echo "$result" | extract_json_object) || true
+    if [ -n "$single" ]; then
+      issues="[$single]"
+    fi
+  fi
+
+  if [ -z "$issues" ] || [ "$issues" = "[]" ]; then
+    log_err "[review] No parseable issues returned from Linear query."
+
+    return 1
+  fi
+
+  # Check each issue for new human PR reviews
+  local count
+  count=$(echo "$issues" | jq 'length')
+  log_err "[review] Found $count review-candidate issue(s). Checking for new PR reviews..."
+
+  for idx in $(seq 0 $((count - 1))); do
+    local issue_json
+    issue_json=$(echo "$issues" | jq -c ".[$idx]")
+    local issue_id
+    issue_id=$(echo "$issue_json" | jq -r '.identifier // .id')
+    local issue_title
+    issue_title=$(echo "$issue_json" | jq -r '.title // ""')
+
+    log_err "[review] Checking issue $((idx + 1))/$count: $issue_id - $issue_title"
+
+    # Find the PR for this issue by searching for the issue identifier in PR titles/branches
+    cd "$work_dir"
+    log_err "  [review] Searching for PR related to $issue_id..."
+    local pr_json
+    pr_json=$(gh pr list --state open --json number,headRefName,title --jq "
+      [.[] | select(.title | test(\"$issue_id\"; \"i\"))] | .[0] // empty
+    " 2>/dev/null) || true
+
+    # Fall back: search by Linear branch name if no PR found by title
+    if [ -z "$pr_json" ] || [ "$pr_json" = "null" ]; then
+      local linear_branch
+      linear_branch=$(echo "$issue_json" | jq -r '.branchName // empty')
+      if [ -n "$linear_branch" ]; then
+        log_err "  [review] No PR found by title. Trying Linear branch: $linear_branch"
+        pr_json=$(gh pr list --head "$linear_branch" --state open --json number,headRefName,title --jq '.[0] // empty' 2>/dev/null) || true
+      fi
+    fi
+
+    if [ -z "$pr_json" ] || [ "$pr_json" = "null" ]; then
+      log_err "  [review] No open PR found for $issue_id. Skipping."
+      continue
+    fi
+
+    local pr_number
+    pr_number=$(echo "$pr_json" | jq -r '.number')
+    local branch_name
+    branch_name=$(echo "$pr_json" | jq -r '.headRefName')
+    local pr_title
+    pr_title=$(echo "$pr_json" | jq -r '.title')
+    log_err "  [review] Found PR #$pr_number: $pr_title (branch: $branch_name)"
+
+    # Fetch remote to ensure we have latest
+    log_err "  [review] Fetching origin/$branch_name..."
+    if ! git fetch origin "$branch_name" 2>/dev/null; then
+      log_err "  [review] Branch $branch_name not found on remote. Skipping."
+      continue
+    fi
+
+    # Check for new human comments using the PR's actual branch
+    local verified_pr
+    verified_pr=$(check_pr_has_new_human_comments "$work_dir" "$branch_name") || {
+      log_err "  [review] No new human comments for $issue_id. Skipping."
+      continue
+    }
+
+    log_err "[review] >>> Found new comments on PR #$pr_number for $issue_id! Processing..."
+
+    # Return the issue JSON augmented with pr_number and the actual PR branch
+    echo "$issue_json" | jq -c ". + {\"prNumber\": $pr_number, \"branchName\": \"$branch_name\"}"
+    return 0
+  done
+
+  log_err "[review] No review-candidate issues have new human PR reviews."
+  return 1
+}
+
+# Generate a review-addressing prd.json from PR comments
+start_review_task() {
+  local work_dir="$1"
+  local issue_json="$2"
+  local ralph_dir="$work_dir/scripts/ralph"
+
+  local pr_number
+  pr_number=$(echo "$issue_json" | jq -r '.prNumber')
+  local issue_id
+  issue_id=$(echo "$issue_json" | jq -r '.identifier // .id')
+  local issue_title
+  issue_title=$(echo "$issue_json" | jq -r '.title')
+  local issue_url
+  issue_url=$(echo "$issue_json" | jq -r '.url // ""')
+  local branch_name
+  branch_name=$(echo "$issue_json" | jq -r '.branchName // empty')
+  [ -z "$branch_name" ] && branch_name="ralph/${issue_id}"
+
+  log_err "[start-review] Generating review-addressing PRD for $issue_id (PR #$pr_number)..."
+  log_err "[start-review] Issue: $issue_title"
+  log_err "[start-review] Branch: $branch_name"
+  log_err "[start-review] URL: $issue_url"
+
+  mkdir -p "$ralph_dir"
+
+  # Collect all non-outdated PR comments
+  log_err "[start-review] Collecting PR comments..."
+  local comments
+  comments=$(get_pr_review_comments "$work_dir" "$pr_number")
+  log_err "[start-review] PR comments collected."
+
+  # Use Claude to generate prd.json addressing the review feedback
+  cd "$work_dir"
+  log_err "[start-review] Checking out branch $branch_name..."
+  git checkout "$branch_name" 2>/dev/null || git checkout -b "$branch_name" "origin/$branch_name"
+  git pull origin "$branch_name" --ff-only 2>/dev/null || true
+  log_err "[start-review] On branch: $(git branch --show-current), latest commit: $(git log -1 --format='%h %s')"
+  log_err "[start-review] Invoking Claude to generate review prd.json..."
+
+  claude --dangerously-skip-permissions --print -p "You need to create a prd.json to address PR review feedback.
+
+## Original Linear Issue (for reference only)
+- ID: $issue_id
+- Title: $issue_title
+- URL: $issue_url
+
+## PR #$pr_number Review Comments
+These are ALL non-resolved, non-outdated comments from the PR. Address all of them.
+
+$comments
+
+## Instructions
+Use the /ralph skill to create a prd.json at $ralph_dir/prd.json that addresses the review feedback above.
+
+Important:
+- The prd.json should create user stories for each piece of review feedback that needs code changes
+- Use the existing branch name: $branch_name
+- The project name should reference the original issue: \"$issue_id: $issue_title (review feedback)\"
+- Group related comments into single user stories where appropriate
+- Include the original comment text in the user story description for context
+- The original Linear issue is provided only for context - focus on the PR review comments" 2>&1 | tee /dev/stderr || true
+
+  # Verify prd.json was created
+  if [ ! -f "$ralph_dir/prd.json" ]; then
+    log_err "[start-review] ERROR: prd.json was not generated at $ralph_dir/prd.json"
+    return 1
+  fi
+
+  log_err "[start-review] prd.json generated successfully at $ralph_dir/prd.json"
+  log_err "[start-review] PRD contents:"
+  jq '.' "$ralph_dir/prd.json" >&2 2>/dev/null || cat "$ralph_dir/prd.json" >&2
+  return 0
 }
 
 # --- Main Loop ---
@@ -268,10 +680,10 @@ Use a HEREDOC for the body to ensure correct formatting." 2>&1 | tee /dev/stderr
 export DISABLE_PUSHOVER_NOTIFICATIONS=true
 export RALPH_LOOP=true
 
-echo "============================================="
-echo "  Ralph Linear Loop"
-echo "  Tool: $TOOL | Max iterations: $MAX_ITERATIONS"
-echo "============================================="
+log "============================================="
+log "  Ralph Linear Loop"
+log "  Tool: $TOOL | Max iterations: $MAX_ITERATIONS"
+log "============================================="
 
 ensure_settings
 
@@ -280,58 +692,117 @@ PROJECT_ID=$(get_setting "projectId")
 WORK_DIR=$(get_setting "workingDirectory")
 
 if [ -z "$TEAM_ID" ] || [ -z "$WORK_DIR" ]; then
-  echo "ERROR: Missing teamId or workingDirectory in $SETTINGS_FILE"
+  log "ERROR: Missing teamId or workingDirectory in $SETTINGS_FILE"
   exit 1
 fi
 
-echo "Team: $TEAM_ID"
-[ -n "$PROJECT_ID" ] && echo "Project: $PROJECT_ID"
-echo "Working directory: $WORK_DIR"
+log "Team: $TEAM_ID"
+[ -n "$PROJECT_ID" ] && log "Project: $PROJECT_ID"
+log "Working directory: $WORK_DIR"
 echo ""
 
 while true; do
-  # Always start from a clean main branch
-  ensure_main_branch "$WORK_DIR"
+  LOOP_START=$(date +%s)
+  log ""
+  log "-----------------------------------------------"
+  log "  Loop iteration started"
+  log "-----------------------------------------------"
 
-  # Start task: fetch issue, mark in progress, generate prd.json (single Claude call)
-  ISSUE_JSON=$(start_task "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID") || true
+  TASK_TYPE=""
+  ISSUE_JSON=""
+  ISSUE_ID=""
+  BRANCH_NAME=""
 
-  if [ -z "$ISSUE_JSON" ]; then
-    echo "No 'prd'-tagged Todo issues found. Polling again in ${POLL_INTERVAL}s..."
-    sleep "$POLL_INTERVAL"
-    continue
+  # --- Priority 1: Check for "In Review" issues with new PR reviews ---
+  log "[loop] Priority 1: Checking for issues with new PR reviews..."
+  REVIEW_JSON=$(check_review_tasks "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID") || true
+
+  if [ -n "$REVIEW_JSON" ]; then
+    TASK_TYPE="review"
+    ISSUE_JSON="$REVIEW_JSON"
+    ISSUE_ID=$(echo "$ISSUE_JSON" | jq -r '.identifier // .id')
+    BRANCH_NAME=$(echo "$ISSUE_JSON" | jq -r '.branchName // empty')
+    [ -z "$BRANCH_NAME" ] && BRANCH_NAME="ralph/${ISSUE_ID}"
+    PR_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.prNumber')
+
+    log ""
+    log "============================================="
+    log "  Addressing PR review: $ISSUE_ID (PR #$PR_NUMBER)"
+    log "  Branch: $BRANCH_NAME"
+    log "============================================="
+
+    # Checkout the existing branch and generate review prd.json
+    cd "$WORK_DIR"
+    start_review_task "$WORK_DIR" "$ISSUE_JSON" || {
+      log "[loop] Failed to generate review PRD. Skipping..."
+      sleep "$POLL_INTERVAL"
+      continue
+    }
   fi
 
-  ISSUE_ID=$(echo "$ISSUE_JSON" | jq -r '.identifier // .id')
-  BRANCH_NAME=$(echo "$ISSUE_JSON" | jq -r '.branchName // empty')
-  [ -z "$BRANCH_NAME" ] && BRANCH_NAME="ralph/${ISSUE_ID}"
+  # --- Priority 2: Check for new "Todo" issues ---
+  if [ -z "$TASK_TYPE" ]; then
+    log "[loop] No review tasks found. Priority 2: Checking for 'Todo' issues..."
 
-  echo ""
-  echo "============================================="
-  echo "  Starting task: $ISSUE_ID"
-  echo "  Branch: $BRANCH_NAME"
-  echo "============================================="
+    ISSUE_JSON=$(start_task "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID") || true
 
-  # Create/checkout the feature branch
-  cd "$WORK_DIR"
-  git checkout -b "$BRANCH_NAME" 2>/dev/null || git checkout "$BRANCH_NAME"
+    if [ -z "$ISSUE_JSON" ]; then
+      log "[loop] No tasks found (review or todo). Polling again in ${POLL_INTERVAL}s..."
+      sleep "$POLL_INTERVAL"
+      continue
+    fi
+
+    # Start from clean main branch for new tasks
+    ensure_main_branch "$WORK_DIR"
+
+    TASK_TYPE="new"
+    ISSUE_ID=$(echo "$ISSUE_JSON" | jq -r '.identifier // .id')
+    BRANCH_NAME=$(echo "$ISSUE_JSON" | jq -r '.branchName // empty')
+    [ -z "$BRANCH_NAME" ] && BRANCH_NAME="ralph/${ISSUE_ID}"
+
+    log ""
+    log "============================================="
+    log "  Starting task: $ISSUE_ID"
+    log "  Branch: $BRANCH_NAME"
+    log "============================================="
+
+    # Create/checkout the feature branch
+    cd "$WORK_DIR"
+    log "[loop] Creating/checking out branch: $BRANCH_NAME"
+    git checkout -b "$BRANCH_NAME" 2>/dev/null || git checkout "$BRANCH_NAME"
+    log "[loop] On branch: $(git branch --show-current)"
+  fi
 
   # Run ralph-loop.sh from the project directory
-  echo ""
-  echo "Starting ralph-loop.sh..."
+  log ""
+  log "[loop] Starting ralph-loop.sh (tool: $TOOL, max iterations: $MAX_ITERATIONS, task type: $TASK_TYPE)..."
+  log "[loop] Working directory: $WORK_DIR"
+  log "[loop] Current branch: $(cd "$WORK_DIR" && git branch --show-current)"
   RALPH_EXIT=0
   CLAUDE_PROJECT_DIR="$WORK_DIR" "$SCRIPT_DIR/ralph-loop.sh" --tool "$TOOL" "$MAX_ITERATIONS" || RALPH_EXIT=$?
+  log "[loop] ralph-loop.sh exited with status: $RALPH_EXIT"
 
-  # Finalize: create PR based on exit status
-  if [ "$RALPH_EXIT" -eq 0 ]; then
-    echo "Ralph completed successfully. Creating PR..."
-    finalize_task "$WORK_DIR" "$ISSUE_JSON" "false"
+  # Finalize based on task type and exit status
+  if [ "$TASK_TYPE" = "review" ]; then
+    # For review tasks: push updates to the existing PR
+    cd "$WORK_DIR"
+    log "[loop] Pushing review fixes to origin..."
+    git push origin "$(git branch --show-current)" 2>/dev/null || true
+    log "[loop] Pushed review fixes to PR #$PR_NUMBER."
   else
-    echo "Ralph exited with status $RALPH_EXIT. Creating draft PR..."
-    finalize_task "$WORK_DIR" "$ISSUE_JSON" "true"
+    # For new tasks: create PR based on exit status
+    if [ "$RALPH_EXIT" -eq 0 ]; then
+      log "[loop] Ralph completed successfully. Creating PR..."
+      finalize_task "$WORK_DIR" "$ISSUE_JSON" "false"
+    else
+      log "[loop] Ralph exited with status $RALPH_EXIT. Creating draft PR..."
+      finalize_task "$WORK_DIR" "$ISSUE_JSON" "true"
+    fi
   fi
 
-  echo ""
-  echo "Task $ISSUE_ID complete. Moving to next task..."
-  echo ""
+  LOOP_END=$(date +%s)
+  LOOP_DURATION=$(( LOOP_END - LOOP_START ))
+  log ""
+  log "[loop] Task $ISSUE_ID ($TASK_TYPE) complete in ${LOOP_DURATION}s. Moving to next task..."
+  log ""
 done
