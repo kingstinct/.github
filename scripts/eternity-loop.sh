@@ -1,10 +1,13 @@
 #!/bin/bash
-# Ralph Linear Loop - Autonomous task runner that pulls PRDs from Linear
-# Usage: ./continuous-linear-loop.sh [--tool amp|claude] [--max-iterations N]
+# Eternity Loop - Autonomous task runner that pulls PRDs from Linear
+# Usage: eternity-loop.sh [--tool amp|claude] [--max-iterations N]
+#
+# Runs in its own git worktree and tmux session called "eternity-loop".
+# If already running, attaches to the existing session.
 #
 # Workflow:
 # 1. Setup: detect Linear team + project (single Claude call)
-# 2. Check for "In Review" issues with new PR reviews (prioritized)
+# 2. Check for "In Review"/"In Progress" issues with new PR comments (prioritized)
 # 3. If no reviews: fetch next "Todo" issue, mark in progress, create branch, generate prd.json
 # 4. Run ralph-loop.sh to execute the PRD
 # 5. Finalize: push branch and create GitHub PR (single Claude call)
@@ -12,10 +15,50 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TMUX_SESSION="eternity-loop"
+WORKTREE_NAME="eternity-loop"
+
+# --- Worktree + tmux bootstrap ---
+# If not already inside the eternity-loop tmux session, set up worktree and launch
+if [ -z "${ETERNITY_LOOP_INSIDE:-}" ]; then
+  REPO_ROOT="$(git rev-parse --show-toplevel)"
+  WORKTREE_PATH="$REPO_ROOT/../$WORKTREE_NAME"
+
+  # Determine the main branch name
+  MAIN_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || true
+  [ -z "$MAIN_BRANCH" ] && MAIN_BRANCH="main"
+
+  # Create worktree if it doesn't exist (start on main branch)
+  if [ ! -d "$WORKTREE_PATH" ]; then
+    echo "Creating git worktree at $WORKTREE_PATH (branch: $MAIN_BRANCH)..."
+    git worktree add "$WORKTREE_PATH" "$MAIN_BRANCH"
+  else
+    echo "Worktree already exists at $WORKTREE_PATH"
+    # Ensure worktree is on main and up to date
+    cd "$WORKTREE_PATH"
+    git checkout "$MAIN_BRANCH" 2>/dev/null || true
+    git pull --ff-only 2>/dev/null || true
+    cd - > /dev/null
+  fi
+
+  # If tmux session already exists, just attach
+  if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    echo "Attaching to existing tmux session '$TMUX_SESSION'..."
+    exec tmux attach-session -t "$TMUX_SESSION"
+  fi
+
+  # Launch a new tmux session running this script inside the worktree
+  echo "Starting tmux session '$TMUX_SESSION' in worktree $WORKTREE_PATH..."
+  exec tmux new-session -s "$TMUX_SESSION" \
+    "cd '$WORKTREE_PATH' && ETERNITY_LOOP_INSIDE=1 '$SCRIPT_DIR/eternity-loop.sh' $*; echo 'Eternity loop exited. Press enter to close.'; read"
+fi
+
+# --- From here on we're inside the tmux session, in the worktree ---
+
 # Ensure Ctrl-C kills the entire process tree
 trap 'echo ""; echo "Interrupted. Cleaning up..."; kill 0; exit 130' INT TERM
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POLL_INTERVAL=60
 TOOL="claude"
 MAX_ITERATIONS=50
@@ -83,7 +126,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Settings directory lives in the working directory (pwd), not the script directory
-SETTINGS_DIR="$(pwd)/.continuous-linear-loop"
+SETTINGS_DIR="$(pwd)/.eternity-loop"
 SETTINGS_FILE="$SETTINGS_DIR/settings.json"
 
 # --- Helpers ---
@@ -107,28 +150,66 @@ EOF
   log "Settings saved to $SETTINGS_FILE"
 }
 
-# --- Claude Call 1: Setup (detect team + project in one call) ---
+# --- Setup: detect team + project with user confirmation ---
 
 setup_linear() {
-  log_err "[setup] Detecting Linear team and project..."
+  log "[setup] Fetching teams and projects from Linear..."
+
   local result
   result=$(claude --dangerously-skip-permissions --print -p "Use the Linear MCP tools to:
 1. List all teams (mcp__claude_ai_Linear__list_teams)
 2. List all projects (mcp__claude_ai_Linear__list_projects)
 
 Return ONLY a JSON object with these fields:
-{\"teamId\": \"<team key or id>\", \"teamName\": \"<team name>\", \"projectId\": \"<project id>\", \"projectName\": \"<project name>\"}
-
-If there is only one team, auto-select it.
-If there are multiple teams, pick the first one.
-If there is only one project, auto-select it.
-If there are multiple projects, pick the first one.
+{
+  \"teams\": [{\"id\": \"...\", \"name\": \"...\"}],
+  \"projects\": [{\"id\": \"...\", \"name\": \"...\"}]
+}
 No other text." 2>&1 | tee /dev/stderr) || true
-  log_err "[setup] Claude returned. Extracting JSON..."
+  log "[setup] Claude returned. Extracting JSON..."
 
   local json
   json=$(echo "$result" | extract_json_object) || true
   echo "$json"
+}
+
+# Interactive selection: present numbered list, return chosen value
+# Usage: pick_from_list "prompt" "json_array" "id_field" "name_field"
+pick_from_list() {
+  local prompt="$1"
+  local json_array="$2"
+  local id_field="$3"
+  local name_field="$4"
+
+  local count
+  count=$(echo "$json_array" | jq 'length')
+
+  if [ "$count" -eq 0 ]; then
+    log "ERROR: No items found."
+    return 1
+  fi
+
+  echo ""
+  echo "$prompt"
+  echo ""
+  for i in $(seq 0 $((count - 1))); do
+    local name id
+    name=$(echo "$json_array" | jq -r ".[$i].$name_field")
+    id=$(echo "$json_array" | jq -r ".[$i].$id_field")
+    echo "  $((i + 1))) $name ($id)"
+  done
+  echo ""
+
+  local choice
+  while true; do
+    read -rp "Enter number (1-$count): " choice
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
+      local idx=$((choice - 1))
+      echo "$json_array" | jq -c ".[$idx]"
+      return 0
+    fi
+    echo "Invalid choice. Please enter a number between 1 and $count."
+  done
 }
 
 ensure_settings() {
@@ -145,19 +226,50 @@ ensure_settings() {
     WORK_DIR=$(jq -r '.workingDirectory // empty' "$SETTINGS_FILE" 2>/dev/null) || true
   fi
 
-  # Self-repair: detect team/project if missing
+  # If team or project missing, fetch from Linear and ask user to choose
   if [ -z "$TEAM_ID" ] || [ -z "$PROJECT_ID" ]; then
-    log "Settings incomplete. Running setup..."
+    log "Settings incomplete. Fetching from Linear..."
     local setup_json
     setup_json=$(setup_linear)
-    if [ -n "$setup_json" ]; then
-      [ -z "$TEAM_ID" ] && TEAM_ID=$(echo "$setup_json" | jq -r '.teamId // empty') || true
-      [ -z "$PROJECT_ID" ] && PROJECT_ID=$(echo "$setup_json" | jq -r '.projectId // empty') || true
-      local team_name project_name
-      team_name=$(echo "$setup_json" | jq -r '.teamName // "unknown"')
-      project_name=$(echo "$setup_json" | jq -r '.projectName // "unknown"')
-      log "Team: $team_name ($TEAM_ID)"
-      log "Project: $project_name ($PROJECT_ID)"
+
+    if [ -z "$setup_json" ]; then
+      log "ERROR: Could not fetch teams/projects from Linear."
+      exit 1
+    fi
+
+    # Select team
+    if [ -z "$TEAM_ID" ]; then
+      local teams
+      teams=$(echo "$setup_json" | jq -c '.teams // []')
+      local team_count
+      team_count=$(echo "$teams" | jq 'length')
+
+      if [ "$team_count" -eq 1 ]; then
+        TEAM_ID=$(echo "$teams" | jq -r '.[0].id')
+        local team_name
+        team_name=$(echo "$teams" | jq -r '.[0].name')
+        log "Auto-selected team: $team_name ($TEAM_ID)"
+      else
+        local chosen_team
+        chosen_team=$(pick_from_list "Select a Linear team:" "$teams" "id" "name")
+        TEAM_ID=$(echo "$chosen_team" | jq -r '.id')
+        local team_name
+        team_name=$(echo "$chosen_team" | jq -r '.name')
+        log "Selected team: $team_name ($TEAM_ID)"
+      fi
+    fi
+
+    # Always ask user to confirm project
+    if [ -z "$PROJECT_ID" ]; then
+      local projects
+      projects=$(echo "$setup_json" | jq -c '.projects // []')
+
+      local chosen_project
+      chosen_project=$(pick_from_list "Select a Linear project:" "$projects" "id" "name")
+      PROJECT_ID=$(echo "$chosen_project" | jq -r '.id')
+      local project_name
+      project_name=$(echo "$chosen_project" | jq -r '.name')
+      log "Selected project: $project_name ($PROJECT_ID)"
     fi
   fi
 
@@ -170,11 +282,21 @@ ensure_settings() {
   save_settings "$TEAM_ID" "$PROJECT_ID" "$WORK_DIR"
 }
 
+clean_working_tree() {
+  local work_dir="$1"
+  cd "$work_dir"
+  log "[git] Cleaning working tree (dropping uncommitted/untracked files)..."
+  git checkout -- . 2>/dev/null || true
+  git clean -fd 2>/dev/null || true
+  log "[git] Working tree clean."
+}
+
 ensure_main_branch() {
   local work_dir="$1"
   cd "$work_dir"
   log "[git] Ensuring main branch is up-to-date..."
   log "[git] Current branch: $(git branch --show-current)"
+  clean_working_tree "$work_dir"
   git checkout main 2>/dev/null || git checkout master
   git pull --ff-only
   log "[git] On $(git branch --show-current), latest: $(git log -1 --format='%h %s')"
@@ -549,7 +671,7 @@ sys.exit(1)
     log_err "  [review] Searching for PR related to $issue_id..."
     local pr_json
     pr_json=$(gh pr list --state open --json number,headRefName,title --jq "
-      [.[] | select(.title | test(\"$issue_id\"; \"i\"))] | .[0] // empty
+      [.[] | select(.title | ascii_downcase | contains(\"$issue_id\" | ascii_downcase))] | .[0] // empty
     " 2>/dev/null) || true
 
     # Fall back: search by Linear branch name if no PR found by title
@@ -631,8 +753,8 @@ start_review_task() {
   comments=$(get_pr_review_comments "$work_dir" "$pr_number")
   log_err "[start-review] PR comments collected."
 
-  # Use Claude to generate prd.json addressing the review feedback
-  cd "$work_dir"
+  # Clean working tree and check out the branch
+  clean_working_tree "$work_dir"
   log_err "[start-review] Checking out branch $branch_name..."
   git checkout "$branch_name" 2>/dev/null || git checkout -b "$branch_name" "origin/$branch_name"
   git pull origin "$branch_name" --ff-only 2>/dev/null || true
@@ -772,6 +894,96 @@ while true; do
     git checkout -b "$BRANCH_NAME" 2>/dev/null || git checkout "$BRANCH_NAME"
     log "[loop] On branch: $(git branch --show-current)"
   fi
+
+  # Write project-specific CLAUDE.md that tells Ralph NOT to manage branches
+  # (branch management is handled by this script)
+  local ralph_dir="$WORK_DIR/scripts/ralph"
+  mkdir -p "$ralph_dir"
+  cat > "$ralph_dir/CLAUDE.md" <<'RALPH_PROMPT'
+# Ralph Agent Instructions
+
+You are an autonomous coding agent working on a software project.
+
+## Your Task
+
+1. Read the PRD at `prd.json` (in the same directory as this file)
+2. Read the progress log at `progress.txt` (check Codebase Patterns section first)
+3. Stay on the current branch. Do NOT create, switch, or check out any branches.
+4. Pick the **highest priority** user story where `passes: false`
+5. Implement that single user story
+6. Run quality checks (e.g., typecheck, lint, test - use whatever your project requires)
+7. Update CLAUDE.md files if you discover reusable patterns (see below)
+8. If checks pass, commit ALL changes with message: `feat: [Story ID] - [Story Title]`
+9. Update the PRD to set `passes: true` for the completed story
+10. Append your progress to `progress.txt`
+
+## Progress Report Format
+
+APPEND to progress.txt (never replace, always append):
+```
+## [Date/Time] - [Story ID]
+- What was implemented
+- Files changed
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Useful context (e.g., "the evaluation panel is in component X")
+---
+```
+
+The learnings section is critical - it helps future iterations avoid repeating mistakes and understand the codebase better.
+
+## Consolidate Patterns
+
+If you discover a **reusable pattern** that future iterations should know, add it to the `## Codebase Patterns` section at the TOP of progress.txt (create it if it doesn't exist). This section should consolidate the most important learnings:
+
+```
+## Codebase Patterns
+- Example: Use `sql<number>` template for aggregations
+- Example: Always use `IF NOT EXISTS` for migrations
+- Example: Export types from actions.ts for UI components
+```
+
+Only add patterns that are **general and reusable**, not story-specific details.
+
+## Update CLAUDE.md Files
+
+Before committing, check if any edited files have learnings worth preserving in nearby CLAUDE.md files:
+
+1. **Identify directories with edited files** - Look at which directories you modified
+2. **Check for existing CLAUDE.md** - Look for CLAUDE.md in those directories or parent directories
+3. **Add valuable learnings** - If you discovered something future developers/agents should know
+
+**Do NOT add:**
+- Story-specific implementation details
+- Temporary debugging notes
+- Information already in progress.txt
+
+## Quality Requirements
+
+- ALL commits must pass your project's quality checks (typecheck, lint, test)
+- Do NOT commit broken code
+- Keep changes focused and minimal
+- Follow existing code patterns
+
+## Stop Condition
+
+After completing a user story, check if ALL stories have `passes: true`.
+
+If ALL stories are complete and passing, reply with:
+<promise>COMPLETE</promise>
+
+If there are still stories with `passes: false`, end your response normally (another iteration will pick up the next story).
+
+## Important
+
+- Work on ONE story per iteration
+- Commit frequently
+- Keep CI green
+- Do NOT switch branches - stay on the current branch at all times
+- Read the Codebase Patterns section in progress.txt before starting
+RALPH_PROMPT
+  log "[loop] Wrote scripts/ralph/CLAUDE.md (no branch management)"
 
   # Run ralph-loop.sh from the project directory
   log ""
