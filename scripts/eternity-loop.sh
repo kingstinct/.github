@@ -1063,6 +1063,7 @@ For each review comment above, post a reply on the PR using the gh CLI explainin
   - For inline review comments: \`gh api repos/{owner}/{repo}/pulls/$PR_NUMBER/comments -f body='...' -f in_reply_to=COMMENT_ID\`
   - For top-level issue comments: \`gh api repos/{owner}/{repo}/issues/$PR_NUMBER/comments -f body='...'\`
 - Keep replies concise and helpful
+- Start every reply with \"🤖 **eternity-loop bot:**\" so it's clear this is an automated response
 - Do NOT make any code changes, only post comment replies" 2>&1 | tee /dev/stderr || true
     log "[loop] Finished replying to PR comments."
   else
