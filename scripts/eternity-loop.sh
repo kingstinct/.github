@@ -16,48 +16,71 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TMUX_SESSION="eternity-loop"
+PROJECT_NAME="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
+TMUX_SESSION="eternity-loop-${PROJECT_NAME}"
 WORKTREE_NAME="eternity-loop"
 
 # --- Worktree + tmux bootstrap ---
 # If not already inside the eternity-loop tmux session, set up worktree and launch
 if [ -z "${ETERNITY_LOOP_INSIDE:-}" ]; then
   REPO_ROOT="$(git rev-parse --show-toplevel)"
-  WORKTREE_PATH="$REPO_ROOT/../$WORKTREE_NAME"
+  WORKTREE_PATH="$REPO_ROOT/.claude/worktrees/$WORKTREE_NAME"
+
+  # Load .env in bootstrap phase so LINEAR_API_KEY can be passed to tmux
+  for _env_candidate in \
+    "$REPO_ROOT/.env.local" \
+    "$REPO_ROOT/.env" \
+    "$SCRIPT_DIR/.env.local" \
+    "$SCRIPT_DIR/.env"; do
+    if [ -f "$_env_candidate" ]; then
+      set -a; source "$_env_candidate"; set +a
+      break
+    fi
+  done
 
   # Determine the main branch name
   MAIN_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || true
   [ -z "$MAIN_BRANCH" ] && MAIN_BRANCH="main"
 
-  # Create worktree if it doesn't exist (start on main branch)
-  if [ ! -d "$WORKTREE_PATH" ]; then
-    echo "Creating git worktree at $WORKTREE_PATH (branch: $MAIN_BRANCH)..."
-    git worktree add "$WORKTREE_PATH" --detach "origin/$MAIN_BRANCH"
-  else
-    echo "Worktree already exists at $WORKTREE_PATH"
-    # Ensure worktree is on main and up to date
-    cd "$WORKTREE_PATH"
-    git fetch origin 2>/dev/null || true
-    git checkout --detach "origin/$MAIN_BRANCH" 2>/dev/null || true
-    cd - > /dev/null
+  # Kill existing tmux session if running
+  if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    echo "Killing existing tmux session '$TMUX_SESSION'..."
+    tmux kill-session -t "$TMUX_SESSION"
   fi
 
-  # If tmux session already exists, just attach
-  if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    echo "Attaching to existing tmux session '$TMUX_SESSION'..."
-    exec tmux attach-session -t "$TMUX_SESSION"
+  # Remove existing worktree and create fresh
+  if [ -d "$WORKTREE_PATH" ]; then
+    echo "Removing existing worktree at $WORKTREE_PATH..."
+    git worktree remove --force "$WORKTREE_PATH" 2>/dev/null || rm -rf "$WORKTREE_PATH"
   fi
+  mkdir -p "$(dirname "$WORKTREE_PATH")"
+  git fetch origin 2>/dev/null || true
+  echo "Creating git worktree at $WORKTREE_PATH (branch: $MAIN_BRANCH)..."
+  git worktree add "$WORKTREE_PATH" --detach "origin/$MAIN_BRANCH"
 
   # Launch a new tmux session running this script inside the worktree
+  # After the script exits, clean up the worktree
   echo "Starting tmux session '$TMUX_SESSION' in worktree $WORKTREE_PATH..."
   exec tmux new-session -s "$TMUX_SESSION" \
-    "cd '$WORKTREE_PATH' && ETERNITY_LOOP_INSIDE=1 '$SCRIPT_DIR/eternity-loop.sh' $*; echo 'Eternity loop exited. Press enter to close.'; read"
+    "cd '$WORKTREE_PATH' && ETERNITY_LOOP_INSIDE=1 ETERNITY_LOOP_WORKTREE='$WORKTREE_PATH' ETERNITY_LOOP_REPO_ROOT='$REPO_ROOT' LINEAR_API_KEY='${LINEAR_API_KEY:-}' '$SCRIPT_DIR/eternity-loop.sh' $*; echo 'Eternity loop exited. Press enter to close.'; read"
 fi
 
 # --- From here on we're inside the tmux session, in the worktree ---
 
-# Ensure Ctrl-C kills the entire process tree
-trap 'echo ""; echo "Interrupted. Cleaning up..."; kill 0; exit 130' INT TERM
+# Clean up the worktree on exit
+cleanup_worktree() {
+  if [ -n "${ETERNITY_LOOP_WORKTREE:-}" ] && [ -n "${ETERNITY_LOOP_REPO_ROOT:-}" ]; then
+    echo ""
+    echo "Cleaning up worktree at $ETERNITY_LOOP_WORKTREE..."
+    cd "$ETERNITY_LOOP_REPO_ROOT"
+    git worktree remove --force "$ETERNITY_LOOP_WORKTREE" 2>/dev/null || rm -rf "$ETERNITY_LOOP_WORKTREE"
+    echo "Worktree removed."
+  fi
+}
+
+# Ensure Ctrl-C kills the entire process tree and cleans up worktree
+trap 'echo ""; echo "Interrupted. Cleaning up..."; cleanup_worktree; kill 0; exit 130' INT TERM
+trap 'cleanup_worktree' EXIT
 
 POLL_INTERVAL=60
 TOOL="claude"
@@ -72,19 +95,42 @@ log_err() {
 }
 
 # Load .env if present (for LINEAR_API_KEY)
-ENV_FILE="$SCRIPT_DIR/.env"
-if [ -f "$ENV_FILE" ]; then
-  set -a; source "$ENV_FILE"; set +a
+# Priority: .env.local > .env, checked in project root > scripts dir > original repo (when in worktree)
+for _env_candidate in \
+  "$(pwd)/.env.local" \
+  "$(pwd)/.env" \
+  "$SCRIPT_DIR/.env.local" \
+  "$SCRIPT_DIR/.env" \
+  "${ETERNITY_LOOP_REPO_ROOT:-}/.env.local" \
+  "${ETERNITY_LOOP_REPO_ROOT:-}/.env" \
+  "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env.local" \
+  "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env"; do
+  [ -z "$_env_candidate" ] && continue
+  if [ -f "$_env_candidate" ]; then
+    set -a; source "$_env_candidate"; set +a
+    break
+  fi
+done
+
+if [ -z "${LINEAR_API_KEY:-}" ]; then
+  log "ERROR: LINEAR_API_KEY is not set. Set it in your shell environment or in a .env file (project root or scripts directory)."
+  exit 1
 fi
 
 linear_graphql() {
   local query="$1"
   local variables="${2:-"{}"}"
   [ -z "$variables" ] && variables="{}"
-  curl -s -X POST https://api.linear.app/graphql \
+  local payload
+  payload="$(jq -n --arg q "$query" --argjson v "$variables" '{query: $q, variables: $v}')"
+  log_err "[linear-api] Request: $(echo "$payload" | jq -c '.variables' 2>/dev/null || echo "$payload")"
+  local response
+  response=$(curl -s -X POST https://api.linear.app/graphql \
     -H "Content-Type: application/json" \
     -H "Authorization: $LINEAR_API_KEY" \
-    -d "$(jq -n --arg q "$query" --argjson v "$variables" '{query: $q, variables: $v}')"
+    -d "$payload")
+  log_err "[linear-api] Response: $(echo "$response" | head -c 1000)"
+  echo "$response"
 }
 
 # Extract the first valid JSON object from mixed text (handles multiline, nested braces)
