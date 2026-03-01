@@ -610,6 +610,7 @@ get_pr_review_comments() {
   # Get review comments (inline code comments) - non-outdated only
   gh api "repos/{owner}/{repo}/pulls/$pr_number/comments" --jq '
     [.[] | select(.position != null or .line != null) | {
+      id: .id,
       author: .user.login,
       path: .path,
       line: (.line // .original_line),
@@ -625,6 +626,7 @@ get_pr_review_comments() {
   # Get issue comments (top-level PR comments)
   gh api "repos/{owner}/{repo}/issues/$pr_number/comments" --jq '
     [.[] | {
+      id: .id,
       author: .user.login,
       body: .body,
       created_at: .created_at
@@ -638,6 +640,7 @@ get_pr_review_comments() {
   # Get PR reviews with body text
   gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" --jq '
     [.[] | select(.body != null and .body != "") | {
+      id: .id,
       author: .user.login,
       state: .state,
       body: .body,
@@ -820,6 +823,8 @@ Use the /ralph skill to create a prd.json at $ralph_dir/prd.json that addresses 
 
 Important:
 - The prd.json should create user stories for each piece of review feedback that needs code changes
+- Comments that are just questions or requests for explanation should NOT become user stories - they will be answered separately
+- If ALL comments are questions/explanations with no code changes needed, create a prd.json with an empty userStories array
 - Use the existing branch name: $branch_name
 - The project name should reference the original issue: \"$issue_id: $issue_title (review feedback)\"
 - Group related comments into single user stories where appropriate
@@ -1035,6 +1040,31 @@ RALPH_PROMPT
     log "[loop] Pushing review fixes to origin..."
     git push origin "$(git branch --show-current)" 2>/dev/null || true
     log "[loop] Pushed review fixes to PR #$PR_NUMBER."
+
+    # Reply to each PR comment explaining how it was addressed
+    log "[loop] Replying to PR comments on PR #$PR_NUMBER..."
+    local review_comments
+    review_comments=$(get_pr_review_comments "$WORK_DIR" "$PR_NUMBER")
+    claude --dangerously-skip-permissions --print -p "You need to reply to PR review comments on PR #$PR_NUMBER in this repo.
+
+## PR Review Comments
+$review_comments
+
+## Recent commits addressing this feedback
+$(cd "$WORK_DIR" && git log --oneline -20)
+
+## Instructions
+For each review comment above, post a reply on the PR using the gh CLI explaining how it was addressed.
+
+- For comments that requested code changes: explain what you changed and where, referencing the relevant commit(s)
+- For comments that asked questions: answer the question thoughtfully based on the codebase, WITHOUT making any code changes
+- For comments that are pure praise/approval: no reply needed
+- Use \`gh api\` to reply to inline review comments and issue comments:
+  - For inline review comments: \`gh api repos/{owner}/{repo}/pulls/$PR_NUMBER/comments -f body='...' -f in_reply_to=COMMENT_ID\`
+  - For top-level issue comments: \`gh api repos/{owner}/{repo}/issues/$PR_NUMBER/comments -f body='...'\`
+- Keep replies concise and helpful
+- Do NOT make any code changes, only post comment replies" 2>&1 | tee /dev/stderr || true
+    log "[loop] Finished replying to PR comments."
   else
     # For new tasks: create PR based on exit status
     if [ "$RALPH_EXIT" -eq 0 ]; then
