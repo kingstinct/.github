@@ -41,10 +41,14 @@ if [ -z "${ETERNITY_LOOP_INSIDE:-}" ]; then
 
   # Load .env in bootstrap phase so LINEAR_API_KEY can be passed to tmux
   load_env \
-    "$REPO_ROOT/.env.local" \
-    "$REPO_ROOT/.env" \
+    "$(pwd)/.env.local" \
+    "$(pwd)/.env" \
     "$SCRIPT_DIR/.env.local" \
-    "$SCRIPT_DIR/.env"
+    "$SCRIPT_DIR/.env" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/.env.local" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/.env" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env.local" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env"
 
   # Determine the main branch name
   MAIN_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || true
