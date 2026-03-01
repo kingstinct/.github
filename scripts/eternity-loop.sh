@@ -20,6 +20,19 @@ PROJECT_NAME="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
 TMUX_SESSION="eternity-loop-${PROJECT_NAME}"
 WORKTREE_NAME="eternity-loop"
 
+# Load .env from multiple candidate paths (first match wins)
+# Priority: .env.local > .env, checked in: cwd > script dir > repo root (when in worktree)
+load_env() {
+  local candidates=("$@")
+  for _env_candidate in "${candidates[@]}"; do
+    [ -z "$_env_candidate" ] && continue
+    if [ -f "$_env_candidate" ]; then
+      set -a; source "$_env_candidate"; set +a
+      break
+    fi
+  done
+}
+
 # --- Worktree + tmux bootstrap ---
 # If not already inside the eternity-loop tmux session, set up worktree and launch
 if [ -z "${ETERNITY_LOOP_INSIDE:-}" ]; then
@@ -27,16 +40,11 @@ if [ -z "${ETERNITY_LOOP_INSIDE:-}" ]; then
   WORKTREE_PATH="$REPO_ROOT/.claude/worktrees/$WORKTREE_NAME"
 
   # Load .env in bootstrap phase so LINEAR_API_KEY can be passed to tmux
-  for _env_candidate in \
+  load_env \
     "$REPO_ROOT/.env.local" \
     "$REPO_ROOT/.env" \
     "$SCRIPT_DIR/.env.local" \
-    "$SCRIPT_DIR/.env"; do
-    if [ -f "$_env_candidate" ]; then
-      set -a; source "$_env_candidate"; set +a
-      break
-    fi
-  done
+    "$SCRIPT_DIR/.env"
 
   # Determine the main branch name
   MAIN_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || true
@@ -82,7 +90,7 @@ cleanup_worktree() {
 trap 'echo ""; echo "Interrupted. Cleaning up..."; cleanup_worktree; kill 0; exit 130' INT TERM
 trap 'cleanup_worktree' EXIT
 
-POLL_INTERVAL=60
+POLL_INTERVAL=120
 TOOL="claude"
 MAX_ITERATIONS=50
 
@@ -95,8 +103,8 @@ log_err() {
 }
 
 # Load .env if present (for LINEAR_API_KEY)
-# Priority: .env.local > .env, checked in project root > scripts dir > original repo (when in worktree)
-for _env_candidate in \
+# Priority: .env.local > .env, checked in cwd > scripts dir > original repo (when in worktree)
+load_env \
   "$(pwd)/.env.local" \
   "$(pwd)/.env" \
   "$SCRIPT_DIR/.env.local" \
@@ -104,13 +112,7 @@ for _env_candidate in \
   "${ETERNITY_LOOP_REPO_ROOT:-}/.env.local" \
   "${ETERNITY_LOOP_REPO_ROOT:-}/.env" \
   "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env.local" \
-  "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env"; do
-  [ -z "$_env_candidate" ] && continue
-  if [ -f "$_env_candidate" ]; then
-    set -a; source "$_env_candidate"; set +a
-    break
-  fi
-done
+  "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env"
 
 if [ -z "${LINEAR_API_KEY:-}" ]; then
   log "ERROR: LINEAR_API_KEY is not set. Set it in your shell environment or in a .env file (project root or scripts directory)."
@@ -187,14 +189,55 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Settings directory lives in the working directory (pwd), not the script directory
-SETTINGS_DIR="$(pwd)/.eternity-loop"
+# Settings directory lives in the root repo (not worktree) so it persists across sessions
+SETTINGS_DIR="${ETERNITY_LOOP_REPO_ROOT:-$(pwd)}/.eternity-loop"
 SETTINGS_FILE="$SETTINGS_DIR/settings.json"
 
 # --- Helpers ---
 
 get_setting() {
   jq -r ".$1 // empty" "$SETTINGS_FILE"
+}
+
+# Extract common fields from issue JSON, sets: issue_id, issue_title, issue_url, branch_name
+parse_issue_fields() {
+  local json="$1"
+  issue_id=$(echo "$json" | jq -r '.identifier // .id')
+  issue_title=$(echo "$json" | jq -r '.title')
+  issue_url=$(echo "$json" | jq -r '.url // ""')
+  branch_name=$(echo "$json" | jq -r '.branchName // empty')
+  [ -z "$branch_name" ] && branch_name="ralph/${issue_id}"
+}
+
+# Build a Linear issue filter for a team, optionally scoped to a project
+build_issue_filter() {
+  local team_id="$1"
+  local project_id="${2:-}"
+  local extra_filter="${3:-}"
+  local filter
+  filter=$(jq -n --arg tid "$team_id" '{
+    team: {id: {eq: $tid}}
+  }')
+  if [ -n "$extra_filter" ]; then
+    filter=$(echo "$filter" | jq --argjson extra "$extra_filter" '. + $extra')
+  fi
+  if [ -n "$project_id" ]; then
+    filter=$(echo "$filter" | jq --arg pid "$project_id" '. + {project: {id: {eq: $pid}}}')
+  fi
+  echo "$filter"
+}
+
+# Verify prd.json was created and log its contents
+verify_prd() {
+  local prd_path="$1"
+  local label="$2"
+  if [ ! -f "$prd_path" ]; then
+    log_err "[$label] ERROR: prd.json was not generated at $prd_path"
+    return 1
+  fi
+  log_err "[$label] prd.json generated successfully."
+  log_err "[$label] PRD contents:"
+  jq '.' "$prd_path" >&2 2>/dev/null || cat "$prd_path" >&2
 }
 
 save_settings() {
@@ -374,14 +417,7 @@ start_task() {
 
   # 1. Fetch Todo issues with prd label via GraphQL
   local filter
-  filter=$(jq -n --arg tid "$team_id" '{
-    team: {id: {eq: $tid}},
-    state: {name: {eq: "Todo"}},
-    labels: {some: {name: {eq: "prd"}}}
-  }')
-  if [ -n "$project_id" ]; then
-    filter=$(echo "$filter" | jq --arg pid "$project_id" '. + {project: {id: {eq: $pid}}}')
-  fi
+  filter=$(build_issue_filter "$team_id" "$project_id" '{"state": {"name": {"eq": "Todo"}}, "labels": {"some": {"name": {"eq": "prd"}}}}')
 
   local query='query($filter: IssueFilter!) {
     issues(filter: $filter, first: 1, orderBy: createdAt) {
@@ -441,15 +477,7 @@ URL: $issue_url
 
 Use the Linear branchName '$issue_branch' for the branchName field in prd.json." >&2 2>&1 || true
 
-  # Verify prd.json was created
-  if [ ! -f "$ralph_dir/prd.json" ]; then
-    log_err "[start-task] ERROR: prd.json was not generated at $ralph_dir/prd.json"
-    return 1
-  fi
-
-  log_err "[start-task] prd.json generated successfully."
-  log_err "[start-task] PRD contents:"
-  jq '.' "$ralph_dir/prd.json" >&2 2>/dev/null || cat "$ralph_dir/prd.json" >&2
+  verify_prd "$ralph_dir/prd.json" "start-task" || return 1
 
   echo "$issue" | jq -c '.'
   return 0
@@ -462,12 +490,8 @@ finalize_task() {
   local issue_json="$2"
   local is_draft="$3"
 
-  local issue_id
-  issue_id=$(echo "$issue_json" | jq -r '.identifier // .id')
-  local issue_title
-  issue_title=$(echo "$issue_json" | jq -r '.title')
-  local issue_url
-  issue_url=$(echo "$issue_json" | jq -r '.url // ""')
+  local issue_id issue_title issue_url branch_name
+  parse_issue_fields "$issue_json"
 
   local draft_flag=""
   local status_label="ready for review"
@@ -534,40 +558,27 @@ check_pr_has_new_human_comments() {
   fi
   log_err "  [review-check] Latest commit on origin/$branch_name: $latest_commit_date"
 
+  # Common jq filter to exclude bots
+  local human_filter=".user.login != \"copilot\" and .user.login != \"github-actions[bot]\" and .user.type != \"Bot\""
+
   # Check inline review comments for new human comments
   local new_review_comments
   new_review_comments=$(gh api "repos/{owner}/{repo}/pulls/$pr_number/comments" --jq "
-    [.[] | select(
-      .user.login != \"copilot\" and
-      .user.login != \"github-actions[bot]\" and
-      .user.type != \"Bot\" and
-      .created_at > \"$latest_commit_date\"
-    )] | length
+    [.[] | select($human_filter and .created_at > \"$latest_commit_date\")] | length
   " 2>/dev/null) || true
   log_err "  [review-check] New human inline comments: ${new_review_comments:-0}"
 
   # Check top-level issue comments
   local new_issue_comments
   new_issue_comments=$(gh api "repos/{owner}/{repo}/issues/$pr_number/comments" --jq "
-    [.[] | select(
-      .user.login != \"copilot\" and
-      .user.login != \"github-actions[bot]\" and
-      .user.type != \"Bot\" and
-      .created_at > \"$latest_commit_date\"
-    )] | length
+    [.[] | select($human_filter and .created_at > \"$latest_commit_date\")] | length
   " 2>/dev/null) || true
   log_err "  [review-check] New human top-level comments: ${new_issue_comments:-0}"
 
   # Check review submissions with body text
   local new_reviews
   new_reviews=$(gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" --jq "
-    [.[] | select(
-      .user.login != \"copilot\" and
-      .user.login != \"github-actions[bot]\" and
-      .user.type != \"Bot\" and
-      .body != null and .body != \"\" and
-      .submitted_at > \"$latest_commit_date\"
-    )] | length
+    [.[] | select($human_filter and .body != null and .body != \"\" and .submitted_at > \"$latest_commit_date\")] | length
   " 2>/dev/null) || true
   log_err "  [review-check] New human review submissions: ${new_reviews:-0}"
 
@@ -662,13 +673,7 @@ check_review_tasks() {
 
   # Fetch all prd-labeled issues via GraphQL
   local filter
-  filter=$(jq -n --arg tid "$team_id" '{
-    team: {id: {eq: $tid}},
-    labels: {some: {name: {eq: "prd"}}}
-  }')
-  if [ -n "$project_id" ]; then
-    filter=$(echo "$filter" | jq --arg pid "$project_id" '. + {project: {id: {eq: $pid}}}')
-  fi
+  filter=$(build_issue_filter "$team_id" "$project_id" '{"labels": {"some": {"name": {"eq": "prd"}}}}')
 
   local query='query($filter: IssueFilter!) {
     issues(filter: $filter, first: 50) {
@@ -768,17 +773,10 @@ start_review_task() {
   local issue_json="$2"
   local ralph_dir="$work_dir/scripts/ralph"
 
+  local issue_id issue_title issue_url branch_name
+  parse_issue_fields "$issue_json"
   local pr_number
   pr_number=$(echo "$issue_json" | jq -r '.prNumber')
-  local issue_id
-  issue_id=$(echo "$issue_json" | jq -r '.identifier // .id')
-  local issue_title
-  issue_title=$(echo "$issue_json" | jq -r '.title')
-  local issue_url
-  issue_url=$(echo "$issue_json" | jq -r '.url // ""')
-  local branch_name
-  branch_name=$(echo "$issue_json" | jq -r '.branchName // empty')
-  [ -z "$branch_name" ] && branch_name="ralph/${issue_id}"
 
   log_err "[start-review] Generating review-addressing PRD for $issue_id (PR #$pr_number)..."
   log_err "[start-review] Issue: $issue_title"
@@ -824,15 +822,7 @@ Important:
 - Include the original comment text in the user story description for context
 - The original Linear issue is provided only for context - focus on the PR review comments" 2>&1 | tee /dev/stderr || true
 
-  # Verify prd.json was created
-  if [ ! -f "$ralph_dir/prd.json" ]; then
-    log_err "[start-review] ERROR: prd.json was not generated at $ralph_dir/prd.json"
-    return 1
-  fi
-
-  log_err "[start-review] prd.json generated successfully at $ralph_dir/prd.json"
-  log_err "[start-review] PRD contents:"
-  jq '.' "$ralph_dir/prd.json" >&2 2>/dev/null || cat "$ralph_dir/prd.json" >&2
+  verify_prd "$ralph_dir/prd.json" "start-review" || return 1
   return 0
 }
 
@@ -882,9 +872,9 @@ while true; do
   if [ -n "$REVIEW_JSON" ]; then
     TASK_TYPE="review"
     ISSUE_JSON="$REVIEW_JSON"
-    ISSUE_ID=$(echo "$ISSUE_JSON" | jq -r '.identifier // .id')
-    BRANCH_NAME=$(echo "$ISSUE_JSON" | jq -r '.branchName // empty')
-    [ -z "$BRANCH_NAME" ] && BRANCH_NAME="ralph/${ISSUE_ID}"
+    parse_issue_fields "$ISSUE_JSON"
+    ISSUE_ID="$issue_id"
+    BRANCH_NAME="$branch_name"
     PR_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.prNumber')
 
     log ""
@@ -918,9 +908,9 @@ while true; do
     ensure_main_branch "$WORK_DIR"
 
     TASK_TYPE="new"
-    ISSUE_ID=$(echo "$ISSUE_JSON" | jq -r '.identifier // .id')
-    BRANCH_NAME=$(echo "$ISSUE_JSON" | jq -r '.branchName // empty')
-    [ -z "$BRANCH_NAME" ] && BRANCH_NAME="ralph/${ISSUE_ID}"
+    parse_issue_fields "$ISSUE_JSON"
+    ISSUE_ID="$issue_id"
+    BRANCH_NAME="$branch_name"
 
     log ""
     log "============================================="
