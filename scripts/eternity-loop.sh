@@ -6,9 +6,9 @@
 # If already running, attaches to the existing session.
 #
 # Workflow:
-# 1. Setup: detect Linear team + project (single Claude call)
-# 2. Check for "In Review"/"In Progress" issues with new PR comments (prioritized)
-# 3. If no reviews: fetch next "Todo" issue, mark in progress, create branch, generate prd.json
+# 1. Setup: detect Linear team + project (via Linear GraphQL API)
+# 2. Check for "In Review"/"In Progress" issues with new PR comments (via Linear API, prioritized)
+# 3. If no reviews: fetch next "Todo" issue via Linear API, mark in progress, create branch, generate prd.json (Claude call)
 # 4. Run ralph-loop.sh to execute the PRD
 # 5. Finalize: push branch and create GitHub PR (single Claude call)
 # 6. Repeat
@@ -32,13 +32,13 @@ if [ -z "${ETERNITY_LOOP_INSIDE:-}" ]; then
   # Create worktree if it doesn't exist (start on main branch)
   if [ ! -d "$WORKTREE_PATH" ]; then
     echo "Creating git worktree at $WORKTREE_PATH (branch: $MAIN_BRANCH)..."
-    git worktree add "$WORKTREE_PATH" "$MAIN_BRANCH"
+    git worktree add "$WORKTREE_PATH" --detach "origin/$MAIN_BRANCH"
   else
     echo "Worktree already exists at $WORKTREE_PATH"
     # Ensure worktree is on main and up to date
     cd "$WORKTREE_PATH"
-    git checkout "$MAIN_BRANCH" 2>/dev/null || true
-    git pull --ff-only 2>/dev/null || true
+    git fetch origin 2>/dev/null || true
+    git checkout --detach "origin/$MAIN_BRANCH" 2>/dev/null || true
     cd - > /dev/null
   fi
 
@@ -69,6 +69,22 @@ log() {
 }
 log_err() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
+}
+
+# Load .env if present (for LINEAR_API_KEY)
+ENV_FILE="$SCRIPT_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a; source "$ENV_FILE"; set +a
+fi
+
+linear_graphql() {
+  local query="$1"
+  local variables="${2:-"{}"}"
+  [ -z "$variables" ] && variables="{}"
+  curl -s -X POST https://api.linear.app/graphql \
+    -H "Content-Type: application/json" \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -d "$(jq -n --arg q "$query" --argjson v "$variables" '{query: $q, variables: $v}')"
 }
 
 # Extract the first valid JSON object from mixed text (handles multiline, nested braces)
@@ -153,24 +169,21 @@ EOF
 # --- Setup: detect team + project with user confirmation ---
 
 setup_linear() {
-  log "[setup] Fetching teams and projects from Linear..."
+  log_err "[setup] Fetching teams and projects from Linear API..."
 
-  local result
-  result=$(claude --dangerously-skip-permissions --print -p "Use the Linear MCP tools to:
-1. List all teams (mcp__claude_ai_Linear__list_teams)
-2. List all projects (mcp__claude_ai_Linear__list_projects)
+  local teams_result
+  teams_result=$(linear_graphql '{ teams { nodes { id key name } } }')
+  local teams
+  teams=$(echo "$teams_result" | jq -c '[.data.teams.nodes[] | {id: .id, name: .name}]')
 
-Return ONLY a JSON object with these fields:
-{
-  \"teams\": [{\"id\": \"...\", \"name\": \"...\"}],
-  \"projects\": [{\"id\": \"...\", \"name\": \"...\"}]
-}
-No other text." 2>&1 | tee /dev/stderr) || true
-  log "[setup] Claude returned. Extracting JSON..."
+  local projects_result
+  projects_result=$(linear_graphql '{ projects(first: 50) { nodes { id name } } }')
+  local projects
+  projects=$(echo "$projects_result" | jq -c '[.data.projects.nodes[] | {id: .id, name: .name}]')
 
-  local json
-  json=$(echo "$result" | extract_json_object) || true
-  echo "$json"
+  log_err "[setup] Found $(echo "$teams" | jq 'length') team(s), $(echo "$projects" | jq 'length') project(s)"
+
+  echo "{\"teams\": $teams, \"projects\": $projects}"
 }
 
 # Interactive selection: present numbered list, return chosen value
@@ -185,20 +198,20 @@ pick_from_list() {
   count=$(echo "$json_array" | jq 'length')
 
   if [ "$count" -eq 0 ]; then
-    log "ERROR: No items found."
+    log_err "ERROR: No items found."
     return 1
   fi
 
-  echo ""
-  echo "$prompt"
-  echo ""
+  echo "" >&2
+  echo "$prompt" >&2
+  echo "" >&2
   for i in $(seq 0 $((count - 1))); do
     local name id
     name=$(echo "$json_array" | jq -r ".[$i].$name_field")
     id=$(echo "$json_array" | jq -r ".[$i].$id_field")
-    echo "  $((i + 1))) $name ($id)"
+    echo "  $((i + 1))) $name ($id)" >&2
   done
-  echo ""
+  echo "" >&2
 
   local choice
   while true; do
@@ -208,7 +221,7 @@ pick_from_list() {
       echo "$json_array" | jq -c ".[$idx]"
       return 0
     fi
-    echo "Invalid choice. Please enter a number between 1 and $count."
+    echo "Invalid choice. Please enter a number between 1 and $count." >&2
   done
 }
 
@@ -297,12 +310,12 @@ ensure_main_branch() {
   log "[git] Ensuring main branch is up-to-date..."
   log "[git] Current branch: $(git branch --show-current)"
   clean_working_tree "$work_dir"
-  git checkout main 2>/dev/null || git checkout master
-  git pull --ff-only
+  git fetch origin
+  git checkout --detach "origin/main" 2>/dev/null || git checkout --detach "origin/master"
   log "[git] On $(git branch --show-current), latest: $(git log -1 --format='%h %s')"
 }
 
-# --- Claude Call 2: Start task (fetch issue + mark in progress + create branch + generate prd.json) ---
+# --- Start task: fetch issue via Linear API, mark in progress, generate prd.json via Claude ---
 
 start_task() {
   local team_id="$1"
@@ -313,49 +326,74 @@ start_task() {
   log_err "[start-task] Fetching next 'Todo' task..."
   log_err "[start-task] Team: $team_id, Project: ${project_id:-<none>}"
 
-  local project_filter=""
+  # 1. Fetch Todo issues with prd label via GraphQL
+  local filter
+  filter=$(jq -n --arg tid "$team_id" '{
+    team: {id: {eq: $tid}},
+    state: {name: {eq: "Todo"}},
+    labels: {some: {name: {eq: "prd"}}}
+  }')
   if [ -n "$project_id" ]; then
-    project_filter=" in project ID '$project_id'"
+    filter=$(echo "$filter" | jq --arg pid "$project_id" '. + {project: {id: {eq: $pid}}}')
   fi
 
-  mkdir -p "$ralph_dir"
-  log_err "[start-task] Querying Linear for 'Todo' issues with 'prd' label..."
-
+  local query='query($filter: IssueFilter!) {
+    issues(filter: $filter, first: 1, orderBy: createdAt) {
+      nodes { id identifier title description url branchName }
+    }
+  }'
+  local variables
+  variables=$(jq -n --argjson f "$filter" '{filter: $f}')
+  log_err "[start-task] Querying Linear API..."
   local result
-  result=$(cd "$work_dir" && claude --dangerously-skip-permissions --print -p "Do the following steps in order:
+  result=$(linear_graphql "$query" "$variables")
+  log_err "[start-task] Linear API response: $(echo "$result" | head -c 500)"
 
-1. Use the Linear MCP (mcp__claude_ai_Linear__list_issues) to find issues for team '$team_id'${project_filter} with status 'Todo' that have the label 'prd'. Get the first issue found.
-
-2. If no issues are found, respond with exactly: NO_ISSUES_FOUND
-
-3. If an issue is found:
-   a. Use the Linear MCP to get the issue details including its branchName (the Linear-recommended git branch name)
-   b. Use the Linear MCP to update that issue's status to 'In Progress'
-   c. Use the /ralph skill to convert the issue into prd.json format and save it to $ralph_dir/prd.json. Use the Linear branchName for the branchName field in prd.json.
-   d. Return ONLY a JSON object with these fields:
-      {\"id\": \"...\", \"identifier\": \"...\", \"title\": \"...\", \"description\": \"...\", \"branchName\": \"<the Linear-recommended branch name>\", \"url\": \"...\"}
-      No other text after the JSON." 2>&1 | tee /dev/stderr) || true
-
-  if echo "$result" | grep -q "NO_ISSUES_FOUND"; then
+  local issue
+  issue=$(echo "$result" | jq '.data.issues.nodes[0] // empty')
+  if [ -z "$issue" ] || [ "$issue" = "null" ]; then
     log_err "[start-task] No 'Todo' issues found in Linear."
     return 1
   fi
 
-  # Extract issue JSON from the output
-  local json
-  json=$(echo "$result" | extract_json_object) || true
+  local issue_uuid issue_id issue_title issue_branch issue_desc issue_url
+  issue_uuid=$(echo "$issue" | jq -r '.id')
+  issue_id=$(echo "$issue" | jq -r '.identifier')
+  issue_title=$(echo "$issue" | jq -r '.title')
+  issue_branch=$(echo "$issue" | jq -r '.branchName // empty')
+  issue_desc=$(echo "$issue" | jq -r '.description // ""')
+  issue_url=$(echo "$issue" | jq -r '.url')
+  log_err "[start-task] Found: $issue_id - $issue_title (branch: $issue_branch)"
 
-  if [ -z "$json" ]; then
-    log_err "[start-task] ERROR: Could not extract issue JSON from Claude response."
-    return 1
+  # 2. Update status to "In Progress" via GraphQL
+  local in_progress_result
+  in_progress_result=$(linear_graphql 'query($teamId: ID!) {
+    teams(filter: {id: {eq: $teamId}}) {
+      nodes { states { nodes { id name } } }
+    }
+  }' "$(jq -n --arg t "$team_id" '{teamId: $t}')")
+  local in_progress_id
+  in_progress_id=$(echo "$in_progress_result" | jq -r '(.data.teams.nodes[0].states.nodes // [])[] | select(.name == "In Progress") | .id')
+
+  if [ -n "$in_progress_id" ]; then
+    linear_graphql 'mutation($id: String!, $stateId: String!) {
+      issueUpdate(id: $id, input: {stateId: $stateId}) { success }
+    }' "$(jq -n --arg id "$issue_uuid" --arg sid "$in_progress_id" '{id: $id, stateId: $sid}')" > /dev/null
+    log_err "[start-task] Status updated to 'In Progress'"
   fi
 
-  local parsed_id parsed_title parsed_branch
-  parsed_id=$(echo "$json" | jq -r '.identifier // .id')
-  parsed_title=$(echo "$json" | jq -r '.title // ""')
-  parsed_branch=$(echo "$json" | jq -r '.branchName // ""')
-  log_err "[start-task] Issue found: $parsed_id - $parsed_title"
-  log_err "[start-task] Branch name: $parsed_branch"
+  # 3. Generate prd.json via Claude + /ralph skill (only Claude call remaining)
+  mkdir -p "$ralph_dir"
+  cd "$work_dir"
+  claude --dangerously-skip-permissions --print -p "Use the /ralph skill to convert this Linear issue into prd.json format and save it to $ralph_dir/prd.json.
+
+Issue ID: $issue_id
+Title: $issue_title
+Description: $issue_desc
+Branch name: $issue_branch
+URL: $issue_url
+
+Use the Linear branchName '$issue_branch' for the branchName field in prd.json." >&2 2>&1 || true
 
   # Verify prd.json was created
   if [ ! -f "$ralph_dir/prd.json" ]; then
@@ -367,11 +405,11 @@ start_task() {
   log_err "[start-task] PRD contents:"
   jq '.' "$ralph_dir/prd.json" >&2 2>/dev/null || cat "$ralph_dir/prd.json" >&2
 
-  echo "$json"
+  echo "$issue" | jq -c '.'
   return 0
 }
 
-# --- Claude Call 3: Finalize task (create PR) ---
+# --- Finalize task (create PR via Claude) ---
 
 finalize_task() {
   local work_dir="$1"
@@ -443,7 +481,7 @@ check_pr_has_new_human_comments() {
 
   # Get the latest commit date on the branch
   local latest_commit_date
-  latest_commit_date=$(git log -1 --format="%aI" "origin/$branch_name" 2>/dev/null) || true
+  latest_commit_date=$(TZ=UTC git log -1 --format="%ad" --date=format-local:'%Y-%m-%dT%H:%M:%SZ' "origin/$branch_name" 2>/dev/null) || true
   if [ -z "$latest_commit_date" ]; then
     log_err "  [review-check] Could not determine latest commit date for origin/$branch_name"
     return 1
@@ -575,79 +613,35 @@ check_review_tasks() {
   local project_id="${3:-}"
 
   log_err "[review] Checking for 'In Review'/'In Progress' issues with new PR feedback..."
-  log_err "[review] Team: $team_id, Project: ${project_id:-<none>}"
 
-  local project_filter=""
+  # Fetch all prd-labeled issues via GraphQL
+  local filter
+  filter=$(jq -n --arg tid "$team_id" '{
+    team: {id: {eq: $tid}},
+    labels: {some: {name: {eq: "prd"}}}
+  }')
   if [ -n "$project_id" ]; then
-    project_filter=" in project ID '$project_id'"
+    filter=$(echo "$filter" | jq --arg pid "$project_id" '. + {project: {id: {eq: $pid}}}')
   fi
 
-  # Use Claude to fetch "In Review" or "In Progress" issues from Linear
-  log_err "[review] Querying Linear for review-candidate issues with 'prd' label..."
+  local query='query($filter: IssueFilter!) {
+    issues(filter: $filter, first: 50) {
+      nodes { id identifier title description url branchName state { name } }
+    }
+  }'
+  local variables
+  variables=$(jq -n --argjson f "$filter" '{filter: $f}')
+  log_err "[review] Querying Linear API..."
   local result
-  result=$(cd "$work_dir" && claude --dangerously-skip-permissions --print -p "I need to find Linear issues that might have PR reviews to address. Do these steps and explain what you find at each step:
+  result=$(linear_graphql "$query" "$variables")
+  log_err "[review] Linear API response: $(echo "$result" | head -c 500)"
 
-1. List all issues for team '$team_id'${project_filter} that have the label 'prd'. Do NOT filter by status yet - get ALL prd-labeled issues regardless of status.
-
-2. From the results, show me what statuses the issues have (print each issue's identifier, title, and status name).
-
-3. Filter to only issues whose status indicates they are in progress or in review (e.g. 'In Review', 'Review', 'In Progress', 'in review', 'Code Review', or any status containing 'review' or 'progress' case-insensitively).
-
-4. For each matching issue, get its branchName from Linear.
-
-5. If no matching issues are found after filtering, respond with exactly: NO_ISSUES_FOUND
-
-6. If issues are found, return a JSON array of objects with these fields:
-{\"id\": \"...\", \"identifier\": \"...\", \"title\": \"...\", \"description\": \"...\", \"branchName\": \"<Linear branchName>\", \"url\": \"...\"}
-Return the JSON as the very last thing in your response." 2>&1 | tee /dev/stderr) || true
-  log_err "[review] Claude returned. Parsing response..."
-
-  if echo "$result" | grep -q "NO_ISSUES_FOUND"; then
-    log_err "[review] No 'In Review'/'In Progress' issues found in Linear."
-    return 1
-  fi
-
-  # Try to extract a JSON array, fall back to single object
+  # Filter to issues with status containing "review" or "progress"
   local issues
-  issues=$(echo "$result" | python3 -c "
-import sys, json
-text = sys.stdin.read()
-# Try to find a JSON array
-depth = 0
-start = None
-for i, ch in enumerate(text):
-    if ch == '[' and depth == 0:
-        start = i
-        depth = 1
-    elif ch in '[{':
-        depth += 1
-    elif ch in ']}' and depth > 0:
-        depth -= 1
-        if depth == 0 and start is not None:
-            candidate = text[start:i+1]
-            try:
-                parsed = json.loads(candidate)
-                if isinstance(parsed, list):
-                    print(json.dumps(parsed))
-                    sys.exit(0)
-            except json.JSONDecodeError:
-                start = None
-                continue
-sys.exit(1)
-" 2>/dev/null) || true
+  issues=$(echo "$result" | jq '[.data.issues.nodes[] | select(.state.name | test("review|progress"; "i"))]')
 
-  # Fall back to single object wrapped in array
-  if [ -z "$issues" ]; then
-    local single
-    single=$(echo "$result" | extract_json_object) || true
-    if [ -n "$single" ]; then
-      issues="[$single]"
-    fi
-  fi
-
-  if [ -z "$issues" ] || [ "$issues" = "[]" ]; then
-    log_err "[review] No parseable issues returned from Linear query."
-
+  if [ -z "$issues" ] || [ "$issues" = "[]" ] || [ "$issues" = "null" ]; then
+    log_err "[review] No 'In Review'/'In Progress' issues found in Linear."
     return 1
   fi
 
@@ -897,7 +891,7 @@ while true; do
 
   # Write project-specific CLAUDE.md that tells Ralph NOT to manage branches
   # (branch management is handled by this script)
-  local ralph_dir="$WORK_DIR/scripts/ralph"
+  ralph_dir="$WORK_DIR/scripts/ralph"
   mkdir -p "$ralph_dir"
   cat > "$ralph_dir/CLAUDE.md" <<'RALPH_PROMPT'
 # Ralph Agent Instructions
