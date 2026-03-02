@@ -1053,7 +1053,6 @@ while true; do
 
     # Reply to each PR comment explaining how it was addressed
     log "[loop] Replying to PR comments on PR #$PR_NUMBER..."
-    local review_comments
     review_comments=$(get_pr_review_comments "$WORK_DIR" "$PR_NUMBER")
     claude --dangerously-skip-permissions --print -p "$(sed "s/PR_NUMBER/$PR_NUMBER/g" "$PROMPTS_DIR/reply-to-pr-comments.md")
 
