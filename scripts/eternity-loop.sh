@@ -1221,6 +1221,36 @@ $RALPH_SKILL_GUIDELINES" 2>&1 | tee /dev/stderr || true
   return 0
 }
 
+# Post progress.txt as a PR comment
+# Usage: post_progress_comment <work_dir> <pr_number>
+post_progress_comment() {
+  local work_dir="$1"
+  local pr_number="$2"
+  local progress_file="$work_dir/scripts/ralph/progress.txt"
+
+  if [ ! -f "$progress_file" ]; then
+    log_err "[progress] No progress.txt found at $progress_file. Skipping comment."
+    return 0
+  fi
+
+  local progress_content
+  progress_content=$(cat "$progress_file")
+  if [ -z "$progress_content" ]; then
+    log_err "[progress] progress.txt is empty. Skipping comment."
+    return 0
+  fi
+
+  log_err "[progress] Posting progress.txt as comment on PR #$pr_number..."
+  local comment_body
+  comment_body=$(printf '🤖 **eternity-loop bot:** Progress log\n\n<details>\n<summary>Click to expand progress log</summary>\n\n```\n%s\n```\n\n</details>' "$progress_content")
+
+  cd "$work_dir"
+  gh pr comment "$pr_number" --body "$comment_body" 2>/dev/null || {
+    log_err "[progress] WARNING: Failed to post progress comment on PR #$pr_number"
+  }
+  log_err "[progress] Progress comment posted on PR #$pr_number."
+}
+
 # --- Main Loop ---
 
 # Suppress notifications in child processes
@@ -1418,12 +1448,18 @@ $review_comments
 ## Recent commits addressing this feedback
 $(cd "$WORK_DIR" && git log --oneline -20)" 2>&1 | tee /dev/stderr || true
     log "[loop] Finished replying to PR comments."
+
+    # Post progress log as PR comment
+    post_progress_comment "$WORK_DIR" "$PR_NUMBER"
   elif [ "$TASK_TYPE" = "ci-fix" ]; then
     # For CI fix tasks: push updates to the existing PR (no comment replies needed)
     cd "$WORK_DIR"
     log "[loop] Pushing CI fixes to origin..."
     git push origin "$(git branch --show-current)" 2>/dev/null || true
     log "[loop] Pushed CI fixes to PR #$PR_NUMBER."
+
+    # Post progress log as PR comment
+    post_progress_comment "$WORK_DIR" "$PR_NUMBER"
   else
     # For new tasks: create PR based on exit status
     if [ "$RALPH_EXIT" -eq 0 ]; then
@@ -1432,6 +1468,16 @@ $(cd "$WORK_DIR" && git log --oneline -20)" 2>&1 | tee /dev/stderr || true
     else
       log "[loop] Ralph exited with status $RALPH_EXIT. Creating draft PR..."
       finalize_task "$WORK_DIR" "$ISSUE_JSON" "true"
+    fi
+
+    # Post progress log as PR comment (look up PR number by branch)
+    cd "$WORK_DIR"
+    local new_pr_number
+    new_pr_number=$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number' 2>/dev/null) || true
+    if [ -n "$new_pr_number" ]; then
+      post_progress_comment "$WORK_DIR" "$new_pr_number"
+    else
+      log "[loop] Could not find PR for branch $BRANCH_NAME. Skipping progress comment."
     fi
   fi
 
