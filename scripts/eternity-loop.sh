@@ -1472,10 +1472,9 @@ $(cd "$WORK_DIR" && git log --oneline -20)" 2>&1 | tee /dev/stderr || true
 
     # Post progress log as PR comment (look up PR number by branch)
     cd "$WORK_DIR"
-    local new_pr_number
-    new_pr_number=$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number' 2>/dev/null) || true
-    if [ -n "$new_pr_number" ]; then
-      post_progress_comment "$WORK_DIR" "$new_pr_number"
+    NEW_PR_NUMBER=$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number' 2>/dev/null) || true
+    if [ -n "$NEW_PR_NUMBER" ]; then
+      post_progress_comment "$WORK_DIR" "$NEW_PR_NUMBER"
     else
       log "[loop] Could not find PR for branch $BRANCH_NAME. Skipping progress comment."
     fi
