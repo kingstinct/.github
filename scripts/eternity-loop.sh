@@ -194,18 +194,18 @@ get_setting() {
 }
 
 # Extract common fields from issue JSON, sets: issue_id, issue_title, issue_url, branch_name
+# Writes JSON to a temp file to avoid pipe/shell-expansion issues with special chars in descriptions
 parse_issue_fields() {
-  local json="$1"
-  if ! echo "$json" | jq empty 2>/dev/null; then
-    log_err "[parse_issue_fields] ERROR: Invalid JSON input ($(echo "$json" | wc -c | tr -d ' ') bytes)"
-    log_err "[parse_issue_fields] First 200 chars: $(echo "$json" | head -c 200)"
-    return 1
-  fi
-  issue_id=$(echo "$json" | jq -r '.identifier // .id')
-  issue_title=$(echo "$json" | jq -r '.title')
-  issue_url=$(echo "$json" | jq -r '.url // ""')
-  branch_name=$(echo "$json" | jq -r '.branchName // empty')
+  local _pif_tmp
+  _pif_tmp=$(mktemp)
+  echo "$1" > "$_pif_tmp"
+  issue_id=$(jq -r '.identifier // .id' "$_pif_tmp") || true
+  issue_title=$(jq -r '.title' "$_pif_tmp") || true
+  issue_url=$(jq -r '.url // ""' "$_pif_tmp") || true
+  branch_name=$(jq -r '.branchName // empty' "$_pif_tmp") || true
+  rm -f "$_pif_tmp"
   [ -z "$branch_name" ] && branch_name="ralph/${issue_id}"
+  log_err "[parse_issue_fields] id=$issue_id branch=$branch_name"
 }
 
 # Build a Linear issue filter for a team, optionally scoped to a project
