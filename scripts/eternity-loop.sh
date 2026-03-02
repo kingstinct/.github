@@ -570,15 +570,45 @@ check_pr_has_new_human_comments() {
   fi
   log_err "  [review-check] Latest commit on origin/$branch_name: $latest_commit_date"
 
-  # Common jq filter to exclude bots
+  # Common jq filter to exclude bots (for REST API endpoints)
   local human_filter=".user.login != \"copilot\" and .user.login != \"github-actions[bot]\" and .user.type != \"Bot\""
 
-  # Check inline review comments for new human comments
-  local new_review_comments
-  new_review_comments=$(gh api "repos/{owner}/{repo}/pulls/$pr_number/comments" --jq "
-    [.[] | select($human_filter and .created_at > \"$latest_commit_date\")] | length
-  " 2>/dev/null) || true
-  log_err "  [review-check] New human inline comments: ${new_review_comments:-0}"
+  # Check inline review comments - only count unresolved, non-outdated threads via GraphQL
+  local new_review_comments=0
+  local repo_nwo
+  repo_nwo=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null) || repo_nwo=""
+  local repo_owner="${repo_nwo%%/*}"
+  local repo_name="${repo_nwo##*/}"
+
+  if [ -n "$repo_owner" ] && [ -n "$repo_name" ]; then
+    new_review_comments=$(gh api graphql -f query='
+      query($owner: String!, $name: String!, $pr: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $pr) {
+            reviewThreads(first: 100) {
+              nodes {
+                isResolved
+                isOutdated
+                comments(first: 50) {
+                  nodes {
+                    author { login }
+                    createdAt
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ' -f owner="$repo_owner" -f name="$repo_name" -F pr="$pr_number" 2>/dev/null | jq --arg cutoff "$latest_commit_date" '
+      [(.data.repository.pullRequest.reviewThreads.nodes // [])[]
+       | select(.isResolved == false and .isOutdated == false)
+       | (.comments.nodes // [])[]
+       | select(.createdAt > $cutoff and (.author.login != "copilot" and .author.login != "github-actions[bot]"))
+      ] | length
+    ' 2>/dev/null) || true
+  fi
+  log_err "  [review-check] New human inline comments (unresolved): ${new_review_comments:-0}"
 
   # Check top-level issue comments
   local new_issue_comments
@@ -615,25 +645,64 @@ get_pr_review_comments() {
 
   log_err "  [comments] Fetching review comments for PR #$pr_number..."
 
-  # Get review comments (inline code comments) - non-outdated only
-  gh api "repos/{owner}/{repo}/pulls/$pr_number/comments" --jq '
-    [.[] | select(.position != null or .line != null) | {
-      id: .id,
-      author: .user.login,
-      path: .path,
-      line: (.line // .original_line),
-      body: .body,
-      created_at: .created_at
-    }]
-  ' > "$tmpdir/review_comments.json" 2>/dev/null || echo "[]" > "$tmpdir/review_comments.json"
+  # Get review comments via GraphQL - only unresolved, non-outdated threads
+  local repo_nwo
+  repo_nwo=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null) || repo_nwo=""
+  local repo_owner="${repo_nwo%%/*}"
+  local repo_name="${repo_nwo##*/}"
+
+  if [ -n "$repo_owner" ] && [ -n "$repo_name" ]; then
+    gh api graphql -f query='
+      query($owner: String!, $name: String!, $pr: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $pr) {
+            reviewThreads(first: 100) {
+              nodes {
+                isResolved
+                isOutdated
+                comments(first: 50) {
+                  nodes {
+                    databaseId
+                    author { login }
+                    path
+                    line
+                    originalLine
+                    body
+                    createdAt
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ' -f owner="$repo_owner" -f name="$repo_name" -F pr="$pr_number" 2>/dev/null | jq '
+      [(.data.repository.pullRequest.reviewThreads.nodes // [])[]
+       | select(.isResolved == false and .isOutdated == false)
+       | (.comments.nodes // [])[]
+       | select(.body | startswith("🤖 **eternity-loop bot:**") | not)
+       | {
+           id: .databaseId,
+           author: .author.login,
+           path: .path,
+           line: (.line // .originalLine),
+           body: .body,
+           created_at: .createdAt
+         }
+      ]
+    ' > "$tmpdir/review_comments.json" 2>/dev/null || echo "[]" > "$tmpdir/review_comments.json"
+  else
+    log_err "  [comments] WARNING: Could not determine repo owner/name, skipping inline review comments"
+    echo "[]" > "$tmpdir/review_comments.json"
+  fi
 
   local rc_count
   rc_count=$(jq 'length' "$tmpdir/review_comments.json" 2>/dev/null || echo 0)
-  log_err "  [comments] Inline review comments (non-outdated): $rc_count"
+  log_err "  [comments] Inline review comments (unresolved, non-outdated): $rc_count"
 
-  # Get issue comments (top-level PR comments)
+  # Get issue comments (top-level PR comments) - exclude bot replies
   gh api "repos/{owner}/{repo}/issues/$pr_number/comments" --jq '
-    [.[] | {
+    [.[] | select(.body | startswith("🤖 **eternity-loop bot:**") | not) | {
       id: .id,
       author: .user.login,
       body: .body,
@@ -643,7 +712,7 @@ get_pr_review_comments() {
 
   local ic_count
   ic_count=$(jq 'length' "$tmpdir/issue_comments.json" 2>/dev/null || echo 0)
-  log_err "  [comments] Top-level PR comments: $ic_count"
+  log_err "  [comments] Top-level PR comments (excluding bot): $ic_count"
 
   # Get PR reviews with body text
   gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" --jq '
