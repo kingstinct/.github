@@ -196,10 +196,10 @@ get_setting() {
 # Extract common fields from issue JSON, sets: issue_id, issue_title, issue_url, branch_name
 parse_issue_fields() {
   local json="$1"
-  issue_id=$(echo "$json" | jq -r '.identifier // .id')
-  issue_title=$(echo "$json" | jq -r '.title')
-  issue_url=$(echo "$json" | jq -r '.url // ""')
-  branch_name=$(echo "$json" | jq -r '.branchName // empty')
+  issue_id=$(printf '%s' "$json" | jq -r '.identifier // .id')
+  issue_title=$(printf '%s' "$json" | jq -r '.title')
+  issue_url=$(printf '%s' "$json" | jq -r '.url // ""')
+  branch_name=$(printf '%s' "$json" | jq -r '.branchName // empty')
   [ -z "$branch_name" ] && branch_name="ralph/${issue_id}"
 }
 
@@ -786,7 +786,7 @@ start_review_task() {
   local issue_id issue_title issue_url branch_name
   parse_issue_fields "$issue_json"
   local pr_number
-  pr_number=$(echo "$issue_json" | jq -r '.prNumber')
+  pr_number=$(printf '%s' "$issue_json" | jq -r '.prNumber')
 
   log_err "[start-review] Generating review-addressing PRD for $issue_id (PR #$pr_number)..."
   log_err "[start-review] Issue: $issue_title"
@@ -887,11 +887,19 @@ while true; do
   if [ -n "$REVIEW_JSON" ]; then
     TASK_TYPE="review"
     ISSUE_JSON="$REVIEW_JSON"
-    log "[loop] Review JSON: $ISSUE_JSON"
+    log "[loop] Review JSON received ($(printf '%s' "$ISSUE_JSON" | wc -c | tr -d ' ') bytes)"
+    set +e
     parse_issue_fields "$ISSUE_JSON"
+    PARSE_EXIT=$?
+    set -e
+    if [ "$PARSE_EXIT" -ne 0 ]; then
+      log "[loop] ERROR: parse_issue_fields failed with status $PARSE_EXIT. Skipping..."
+      sleep "$POLL_INTERVAL"
+      continue
+    fi
     ISSUE_ID="$issue_id"
     BRANCH_NAME="$branch_name"
-    PR_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.prNumber')
+    PR_NUMBER=$(printf '%s' "$ISSUE_JSON" | jq -r '.prNumber')
     log "[loop] Parsed review task: issue=$ISSUE_ID branch=$BRANCH_NAME pr=#$PR_NUMBER"
 
     log ""
