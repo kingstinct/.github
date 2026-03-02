@@ -196,10 +196,15 @@ get_setting() {
 # Extract common fields from issue JSON, sets: issue_id, issue_title, issue_url, branch_name
 parse_issue_fields() {
   local json="$1"
-  issue_id=$(printf '%s' "$json" | jq -r '.identifier // .id')
-  issue_title=$(printf '%s' "$json" | jq -r '.title')
-  issue_url=$(printf '%s' "$json" | jq -r '.url // ""')
-  branch_name=$(printf '%s' "$json" | jq -r '.branchName // empty')
+  if ! echo "$json" | jq empty 2>/dev/null; then
+    log_err "[parse_issue_fields] ERROR: Invalid JSON input ($(echo "$json" | wc -c | tr -d ' ') bytes)"
+    log_err "[parse_issue_fields] First 200 chars: $(echo "$json" | head -c 200)"
+    return 1
+  fi
+  issue_id=$(echo "$json" | jq -r '.identifier // .id')
+  issue_title=$(echo "$json" | jq -r '.title')
+  issue_url=$(echo "$json" | jq -r '.url // ""')
+  branch_name=$(echo "$json" | jq -r '.branchName // empty')
   [ -z "$branch_name" ] && branch_name="ralph/${issue_id}"
 }
 
@@ -899,7 +904,7 @@ while true; do
     fi
     ISSUE_ID="$issue_id"
     BRANCH_NAME="$branch_name"
-    PR_NUMBER=$(printf '%s' "$ISSUE_JSON" | jq -r '.prNumber')
+    PR_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.prNumber')
     log "[loop] Parsed review task: issue=$ISSUE_ID branch=$BRANCH_NAME pr=#$PR_NUMBER"
 
     log ""
