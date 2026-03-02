@@ -236,6 +236,18 @@ verify_prd() {
 
 # Load ralph SKILL.md guidelines for PRD generation prompts
 RALPH_SKILL_GUIDELINES=$(cat "$SCRIPT_DIR/../general/skills/ralph/SKILL.md" 2>/dev/null || echo "")
+PROMPTS_DIR="$SCRIPT_DIR/eternity-loop-prompts"
+if [ ! -d "$PROMPTS_DIR" ]; then
+  log "WARNING: Prompts directory not found at $PROMPTS_DIR"
+fi
+
+# Helper to read a prompt file with fallback
+read_prompt() {
+  if [ ! -f "$PROMPTS_DIR/$1" ]; then
+    log_err "WARNING: Prompt file not found: $PROMPTS_DIR/$1"
+  fi
+  cat "$PROMPTS_DIR/$1" 2>/dev/null || echo "# $1 (prompt file not found)"
+}
 
 save_settings() {
   local team_id="$1"
@@ -464,7 +476,7 @@ start_task() {
   # 3. Generate prd.json via Claude using ralph skill guidelines
   mkdir -p "$ralph_dir"
   cd "$work_dir"
-  claude --dangerously-skip-permissions --print -p "$(cat "$SCRIPT_DIR/eternity-loop-prompts/create-prd.md")
+  claude --dangerously-skip-permissions --print -p "$(read_prompt create-prd.md)
 
 Save to: $ralph_dir/prd.json
 branchName: $issue_branch
@@ -513,7 +525,7 @@ finalize_task() {
   git push -u origin "$branch" 2>/dev/null || git push origin "$branch"
   log_err "[finalize] Branch pushed. Invoking Claude to create PR..."
 
-  claude --dangerously-skip-permissions --print -p "$(cat "$SCRIPT_DIR/eternity-loop-prompts/create-pr.md")
+  claude --dangerously-skip-permissions --print -p "$(read_prompt create-pr.md)
 
 Title: $issue_id: $issue_title
 $( [ "$is_draft" = "true" ] && echo "Make it a DRAFT PR with: gh pr create --draft" || echo "Make it a regular PR with: gh pr create" )
@@ -792,12 +804,18 @@ start_review_task() {
   # Clean working tree and check out the branch
   clean_working_tree "$work_dir"
   log_err "[start-review] Checking out branch $branch_name..."
-  git checkout "$branch_name" 2>/dev/null || git checkout -b "$branch_name" "origin/$branch_name"
+  if ! git checkout "$branch_name" 2>/dev/null; then
+    log_err "[start-review] Branch $branch_name not found locally, creating from origin..."
+    git checkout -b "$branch_name" "origin/$branch_name" || {
+      log_err "[start-review] ERROR: Could not check out branch $branch_name"
+      return 1
+    }
+  fi
   git pull origin "$branch_name" --ff-only 2>/dev/null || true
   log_err "[start-review] On branch: $(git branch --show-current), latest commit: $(git log -1 --format='%h %s')"
   log_err "[start-review] Invoking Claude to generate review prd.json..."
 
-  claude --dangerously-skip-permissions --print -p "$(cat "$SCRIPT_DIR/eternity-loop-prompts/create-review-prd.md")
+  claude --dangerously-skip-permissions --print -p "$(read_prompt create-review-prd.md)
 
 Save to: $ralph_dir/prd.json
 branchName: $branch_name
@@ -864,10 +882,12 @@ while true; do
   if [ -n "$REVIEW_JSON" ]; then
     TASK_TYPE="review"
     ISSUE_JSON="$REVIEW_JSON"
+    log "[loop] Review JSON: $ISSUE_JSON"
     parse_issue_fields "$ISSUE_JSON"
     ISSUE_ID="$issue_id"
     BRANCH_NAME="$branch_name"
     PR_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.prNumber')
+    log "[loop] Parsed review task: issue=$ISSUE_ID branch=$BRANCH_NAME pr=#$PR_NUMBER"
 
     log ""
     log "============================================="
@@ -877,11 +897,13 @@ while true; do
 
     # Checkout the existing branch and generate review prd.json
     cd "$WORK_DIR"
+    log "[loop] Starting review task..."
     start_review_task "$WORK_DIR" "$ISSUE_JSON" || {
       log "[loop] Failed to generate review PRD. Skipping..."
       sleep "$POLL_INTERVAL"
       continue
     }
+    log "[loop] Review task PRD generated successfully."
   fi
 
   # --- Priority 2: Check for new "Todo" issues ---
@@ -922,7 +944,7 @@ while true; do
   ralph_dir="$WORK_DIR/scripts/ralph"
   mkdir -p "$ralph_dir"
   # Copy ralph CLAUDE.md with branch override (step 3 changed from upstream)
-  cp "$SCRIPT_DIR/eternity-loop-prompts/ralph-claude-md.md" "$ralph_dir/CLAUDE.md"
+  cp "$PROMPTS_DIR/ralph-claude-md.md" "$ralph_dir/CLAUDE.md"
   log "[loop] Wrote scripts/ralph/CLAUDE.md (branch override)"
 
   # Run ralph-loop.sh from the project directory
@@ -946,7 +968,7 @@ while true; do
     log "[loop] Replying to PR comments on PR #$PR_NUMBER..."
     local review_comments
     review_comments=$(get_pr_review_comments "$WORK_DIR" "$PR_NUMBER")
-    claude --dangerously-skip-permissions --print -p "$(sed "s/PR_NUMBER/$PR_NUMBER/g" "$SCRIPT_DIR/eternity-loop-prompts/reply-to-pr-comments.md")
+    claude --dangerously-skip-permissions --print -p "$(sed "s/PR_NUMBER/$PR_NUMBER/g" "$PROMPTS_DIR/reply-to-pr-comments.md")
 
 ## PR #$PR_NUMBER Review Comments
 $review_comments
