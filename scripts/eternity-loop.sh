@@ -877,7 +877,12 @@ while true; do
 
   # --- Priority 1: Check for "In Review" issues with new PR reviews ---
   log "[loop] Priority 1: Checking for issues with new PR reviews..."
-  REVIEW_JSON=$(check_review_tasks "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID") || true
+  REVIEW_JSON=""
+  set +e
+  REVIEW_JSON=$(check_review_tasks "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID")
+  REVIEW_EXIT=$?
+  set -e
+  log "[loop] check_review_tasks exited with status $REVIEW_EXIT"
 
   if [ -n "$REVIEW_JSON" ]; then
     TASK_TYPE="review"
