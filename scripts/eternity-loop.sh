@@ -7,11 +7,12 @@
 #
 # Workflow:
 # 1. Setup: detect Linear team + project (via Linear GraphQL API)
-# 2. Check for "In Review"/"In Progress" issues with new PR comments (via Linear API, prioritized)
-# 3. If no reviews: fetch next "Todo" issue via Linear API, mark in progress, create branch, generate prd.json (Claude call)
-# 4. Run ralph-loop.sh to execute the PRD
-# 5. Finalize: push branch and create GitHub PR (single Claude call)
-# 6. Repeat
+# 2. Priority 1: Check for "In Review"/"In Progress" issues with new PR comments (via Linear API)
+# 3. Priority 2: Check for CI failures on existing PRs and attempt auto-fix
+# 4. Priority 3: Fetch next "Todo" issue via Linear API, mark in progress, create branch, generate prd.json
+# 5. Run ralph-loop.sh to execute the PRD
+# 6. Finalize: push branch and create GitHub PR (or push fixes to existing PR)
+# 7. Repeat
 
 set -euo pipefail
 
@@ -20,6 +21,26 @@ PROJECT_NAME="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
 TMUX_SESSION="eternity-loop-${PROJECT_NAME}"
 WORKTREE_NAME="eternity-loop"
 
+# Load .env from standard candidate paths (first match wins)
+# Priority: .env.local > .env, checked in: cwd > script dir > repo root (when in worktree)
+load_env() {
+  for _env_candidate in \
+    "$(pwd)/.env.local" \
+    "$(pwd)/.env" \
+    "$SCRIPT_DIR/.env.local" \
+    "$SCRIPT_DIR/.env" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/.env.local" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/.env" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env.local" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env"; do
+    [ -z "$_env_candidate" ] && continue
+    if [ -f "$_env_candidate" ]; then
+      set -a; source "$_env_candidate"; set +a
+      break
+    fi
+  done
+}
+
 # --- Worktree + tmux bootstrap ---
 # If not already inside the eternity-loop tmux session, set up worktree and launch
 if [ -z "${ETERNITY_LOOP_INSIDE:-}" ]; then
@@ -27,16 +48,7 @@ if [ -z "${ETERNITY_LOOP_INSIDE:-}" ]; then
   WORKTREE_PATH="$REPO_ROOT/.claude/worktrees/$WORKTREE_NAME"
 
   # Load .env in bootstrap phase so LINEAR_API_KEY can be passed to tmux
-  for _env_candidate in \
-    "$REPO_ROOT/.env.local" \
-    "$REPO_ROOT/.env" \
-    "$SCRIPT_DIR/.env.local" \
-    "$SCRIPT_DIR/.env"; do
-    if [ -f "$_env_candidate" ]; then
-      set -a; source "$_env_candidate"; set +a
-      break
-    fi
-  done
+  load_env
 
   # Determine the main branch name
   MAIN_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || true
@@ -82,7 +94,7 @@ cleanup_worktree() {
 trap 'echo ""; echo "Interrupted. Cleaning up..."; cleanup_worktree; kill 0; exit 130' INT TERM
 trap 'cleanup_worktree' EXIT
 
-POLL_INTERVAL=60
+POLL_INTERVAL=120
 TOOL="claude"
 MAX_ITERATIONS=50
 
@@ -95,22 +107,7 @@ log_err() {
 }
 
 # Load .env if present (for LINEAR_API_KEY)
-# Priority: .env.local > .env, checked in project root > scripts dir > original repo (when in worktree)
-for _env_candidate in \
-  "$(pwd)/.env.local" \
-  "$(pwd)/.env" \
-  "$SCRIPT_DIR/.env.local" \
-  "$SCRIPT_DIR/.env" \
-  "${ETERNITY_LOOP_REPO_ROOT:-}/.env.local" \
-  "${ETERNITY_LOOP_REPO_ROOT:-}/.env" \
-  "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env.local" \
-  "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env"; do
-  [ -z "$_env_candidate" ] && continue
-  if [ -f "$_env_candidate" ]; then
-    set -a; source "$_env_candidate"; set +a
-    break
-  fi
-done
+load_env
 
 if [ -z "${LINEAR_API_KEY:-}" ]; then
   log "ERROR: LINEAR_API_KEY is not set. Set it in your shell environment or in a .env file (project root or scripts directory)."
@@ -187,14 +184,75 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Settings directory lives in the working directory (pwd), not the script directory
-SETTINGS_DIR="$(pwd)/.eternity-loop"
+# Settings directory lives in the root repo (not worktree) so it persists across sessions
+SETTINGS_DIR="${ETERNITY_LOOP_REPO_ROOT:-$(pwd)}/.eternity-loop"
 SETTINGS_FILE="$SETTINGS_DIR/settings.json"
 
 # --- Helpers ---
 
 get_setting() {
   jq -r ".$1 // empty" "$SETTINGS_FILE"
+}
+
+# Extract common fields from issue JSON, sets: issue_id, issue_title, issue_url, branch_name
+# Writes JSON to a temp file to avoid pipe/shell-expansion issues with special chars in descriptions
+parse_issue_fields() {
+  local _pif_tmp
+  _pif_tmp=$(mktemp)
+  echo "$1" > "$_pif_tmp"
+  issue_id=$(jq -r '.identifier // .id' "$_pif_tmp") || true
+  issue_title=$(jq -r '.title' "$_pif_tmp") || true
+  issue_url=$(jq -r '.url // ""' "$_pif_tmp") || true
+  branch_name=$(jq -r '.branchName // empty' "$_pif_tmp") || true
+  rm -f "$_pif_tmp"
+  [ -z "$branch_name" ] && branch_name="ralph/${issue_id}"
+  log_err "[parse_issue_fields] id=$issue_id branch=$branch_name"
+}
+
+# Build a Linear issue filter for a team, optionally scoped to a project
+build_issue_filter() {
+  local team_id="$1"
+  local project_id="${2:-}"
+  local extra_filter="${3:-}"
+  local filter
+  filter=$(jq -n --arg tid "$team_id" '{
+    team: {id: {eq: $tid}}
+  }')
+  if [ -n "$extra_filter" ]; then
+    filter=$(echo "$filter" | jq --argjson extra "$extra_filter" '. + $extra')
+  fi
+  if [ -n "$project_id" ]; then
+    filter=$(echo "$filter" | jq --arg pid "$project_id" '. + {project: {id: {eq: $pid}}}')
+  fi
+  echo "$filter"
+}
+
+# Verify prd.json was created and log its contents
+verify_prd() {
+  local prd_path="$1"
+  local label="$2"
+  if [ ! -f "$prd_path" ]; then
+    log_err "[$label] ERROR: prd.json was not generated at $prd_path"
+    return 1
+  fi
+  log_err "[$label] prd.json generated successfully."
+  log_err "[$label] PRD contents:"
+  jq '.' "$prd_path" >&2 2>/dev/null || cat "$prd_path" >&2
+}
+
+# Load ralph SKILL.md guidelines for PRD generation prompts
+RALPH_SKILL_GUIDELINES=$(cat "$SCRIPT_DIR/../general/skills/ralph/SKILL.md" 2>/dev/null || echo "")
+PROMPTS_DIR="$SCRIPT_DIR/eternity-loop-prompts"
+if [ ! -d "$PROMPTS_DIR" ]; then
+  log "WARNING: Prompts directory not found at $PROMPTS_DIR"
+fi
+
+# Helper to read a prompt file with fallback
+read_prompt() {
+  if [ ! -f "$PROMPTS_DIR/$1" ]; then
+    log_err "WARNING: Prompt file not found: $PROMPTS_DIR/$1"
+  fi
+  cat "$PROMPTS_DIR/$1" 2>/dev/null || echo "# $1 (prompt file not found)"
 }
 
 save_settings() {
@@ -374,14 +432,7 @@ start_task() {
 
   # 1. Fetch Todo issues with prd label via GraphQL
   local filter
-  filter=$(jq -n --arg tid "$team_id" '{
-    team: {id: {eq: $tid}},
-    state: {name: {eq: "Todo"}},
-    labels: {some: {name: {eq: "prd"}}}
-  }')
-  if [ -n "$project_id" ]; then
-    filter=$(echo "$filter" | jq --arg pid "$project_id" '. + {project: {id: {eq: $pid}}}')
-  fi
+  filter=$(build_issue_filter "$team_id" "$project_id" '{"state": {"name": {"eq": "Todo"}}, "labels": {"some": {"name": {"eq": "prd"}}}}')
 
   local query='query($filter: IssueFilter!) {
     issues(filter: $filter, first: 1, orderBy: createdAt) {
@@ -428,28 +479,24 @@ start_task() {
     log_err "[start-task] Status updated to 'In Progress'"
   fi
 
-  # 3. Generate prd.json via Claude + /ralph skill (only Claude call remaining)
+  # 3. Generate prd.json via Claude using ralph skill guidelines
   mkdir -p "$ralph_dir"
   cd "$work_dir"
-  claude --dangerously-skip-permissions --print -p "Use the /ralph skill to convert this Linear issue into prd.json format and save it to $ralph_dir/prd.json.
+  claude --dangerously-skip-permissions --print -p "$(read_prompt create-prd.md)
 
-Issue ID: $issue_id
-Title: $issue_title
-Description: $issue_desc
-Branch name: $issue_branch
-URL: $issue_url
+Save to: $ralph_dir/prd.json
+branchName: $issue_branch
 
-Use the Linear branchName '$issue_branch' for the branchName field in prd.json." >&2 2>&1 || true
+## Linear Issue
+- ID: $issue_id
+- Title: $issue_title
+- Description: $issue_desc
+- Branch name: $issue_branch
+- URL: $issue_url
 
-  # Verify prd.json was created
-  if [ ! -f "$ralph_dir/prd.json" ]; then
-    log_err "[start-task] ERROR: prd.json was not generated at $ralph_dir/prd.json"
-    return 1
-  fi
+$RALPH_SKILL_GUIDELINES" >&2 2>&1 || true
 
-  log_err "[start-task] prd.json generated successfully."
-  log_err "[start-task] PRD contents:"
-  jq '.' "$ralph_dir/prd.json" >&2 2>/dev/null || cat "$ralph_dir/prd.json" >&2
+  verify_prd "$ralph_dir/prd.json" "start-task" || return 1
 
   echo "$issue" | jq -c '.'
   return 0
@@ -462,12 +509,8 @@ finalize_task() {
   local issue_json="$2"
   local is_draft="$3"
 
-  local issue_id
-  issue_id=$(echo "$issue_json" | jq -r '.identifier // .id')
-  local issue_title
-  issue_title=$(echo "$issue_json" | jq -r '.title')
-  local issue_url
-  issue_url=$(echo "$issue_json" | jq -r '.url // ""')
+  local issue_id issue_title issue_url branch_name
+  parse_issue_fields "$issue_json"
 
   local draft_flag=""
   local status_label="ready for review"
@@ -488,17 +531,11 @@ finalize_task() {
   git push -u origin "$branch" 2>/dev/null || git push origin "$branch"
   log_err "[finalize] Branch pushed. Invoking Claude to create PR..."
 
-  claude --dangerously-skip-permissions --print -p "Create a GitHub PR for the current branch using the gh CLI.
+  claude --dangerously-skip-permissions --print -p "$(read_prompt create-pr.md)
 
 Title: $issue_id: $issue_title
 $( [ "$is_draft" = "true" ] && echo "Make it a DRAFT PR with: gh pr create --draft" || echo "Make it a regular PR with: gh pr create" )
-
-In the PR body include:
-- Resolves $issue_id
-- Link to Linear issue: $issue_url
-- A summary of what was implemented based on the commits on this branch (use git log main..HEAD)
-
-Use a HEREDOC for the body to ensure correct formatting." 2>&1 | tee /dev/stderr || true
+Linear issue: $issue_url" 2>&1 | tee /dev/stderr || true
 
   log_err "[finalize] PR created for $issue_id."
 }
@@ -534,40 +571,60 @@ check_pr_has_new_human_comments() {
   fi
   log_err "  [review-check] Latest commit on origin/$branch_name: $latest_commit_date"
 
-  # Check inline review comments for new human comments
-  local new_review_comments
-  new_review_comments=$(gh api "repos/{owner}/{repo}/pulls/$pr_number/comments" --jq "
-    [.[] | select(
-      .user.login != \"copilot\" and
-      .user.login != \"github-actions[bot]\" and
-      .user.type != \"Bot\" and
-      .created_at > \"$latest_commit_date\"
-    )] | length
-  " 2>/dev/null) || true
-  log_err "  [review-check] New human inline comments: ${new_review_comments:-0}"
+  # Common jq filter to exclude bots (for REST API endpoints)
+  local human_filter=".user.login != \"copilot\" and .user.login != \"github-actions[bot]\" and .user.type != \"Bot\""
 
-  # Check top-level issue comments
+  # Check inline review comments - only count unresolved, non-outdated threads via GraphQL
+  local new_review_comments=0
+  local repo_nwo
+  repo_nwo=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null) || repo_nwo=""
+  local repo_owner="${repo_nwo%%/*}"
+  local repo_name="${repo_nwo##*/}"
+
+  if [ -n "$repo_owner" ] && [ -n "$repo_name" ]; then
+    new_review_comments=$(gh api graphql -f query='
+      query($owner: String!, $name: String!, $pr: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $pr) {
+            reviewThreads(first: 100) {
+              nodes {
+                isResolved
+                isOutdated
+                comments(first: 50) {
+                  nodes {
+                    author { login }
+                    body
+                    createdAt
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ' -f owner="$repo_owner" -f name="$repo_name" -F pr="$pr_number" 2>/dev/null | jq --arg cutoff "$latest_commit_date" '
+      [(.data.repository.pullRequest.reviewThreads.nodes // [])[]
+       | select(.isResolved == false and .isOutdated == false)
+       | (.comments.nodes // [])[]
+       | select(.createdAt > $cutoff
+         and (.author.login != "copilot" and .author.login != "github-actions[bot]")
+         and (.body | startswith("🤖 **eternity-loop bot:**") | not))
+      ] | length
+    ' 2>/dev/null) || true
+  fi
+  log_err "  [review-check] New human inline comments (unresolved): ${new_review_comments:-0}"
+
+  # Check top-level issue comments (exclude bot replies by body prefix)
   local new_issue_comments
   new_issue_comments=$(gh api "repos/{owner}/{repo}/issues/$pr_number/comments" --jq "
-    [.[] | select(
-      .user.login != \"copilot\" and
-      .user.login != \"github-actions[bot]\" and
-      .user.type != \"Bot\" and
-      .created_at > \"$latest_commit_date\"
-    )] | length
+    [.[] | select($human_filter and .created_at > \"$latest_commit_date\" and (.body | startswith(\"🤖 **eternity-loop bot:**\") | not))] | length
   " 2>/dev/null) || true
   log_err "  [review-check] New human top-level comments: ${new_issue_comments:-0}"
 
-  # Check review submissions with body text
+  # Check review submissions with body text (exclude bot replies by body prefix)
   local new_reviews
   new_reviews=$(gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" --jq "
-    [.[] | select(
-      .user.login != \"copilot\" and
-      .user.login != \"github-actions[bot]\" and
-      .user.type != \"Bot\" and
-      .body != null and .body != \"\" and
-      .submitted_at > \"$latest_commit_date\"
-    )] | length
+    [.[] | select($human_filter and .body != null and .body != \"\" and .submitted_at > \"$latest_commit_date\" and (.body | startswith(\"🤖 **eternity-loop bot:**\") | not))] | length
   " 2>/dev/null) || true
   log_err "  [review-check] New human review submissions: ${new_reviews:-0}"
 
@@ -581,6 +638,137 @@ check_pr_has_new_human_comments() {
   return 1
 }
 
+# Check if a PR has CI failures (and is eligible for auto-fix)
+# Returns 0 if there are actionable CI failures, 1 otherwise
+# Outputs the PR number on success
+# Loop prevention:
+#   1. Skip if latest commit message starts with "fix(ci):" (already attempted)
+#   2. Tracking file maps {branch: headSHA} — skip if HEAD hasn't changed since last attempt
+#   3. Pending checks gate — skip if any checks are still pending
+check_pr_has_ci_failures() {
+  local work_dir="$1"
+  local branch_name="$2"
+
+  cd "$work_dir"
+
+  # Find the PR for this branch
+  log_err "  [ci-check] Looking for PR with head branch: $branch_name"
+  local pr_number
+  pr_number=$(gh pr list --head "$branch_name" --json number --jq '.[0].number' 2>/dev/null) || true
+  if [ -z "$pr_number" ]; then
+    log_err "  [ci-check] No PR found for branch $branch_name"
+    return 1
+  fi
+  log_err "  [ci-check] Found PR #$pr_number for branch $branch_name"
+
+  # Loop prevention layer 1: check if latest commit starts with "fix(ci):"
+  local latest_commit_msg
+  latest_commit_msg=$(git log -1 --format="%s" "origin/$branch_name" 2>/dev/null) || true
+  if [[ "$latest_commit_msg" == fix\(ci\):* ]]; then
+    log_err "  [ci-check] Latest commit already a CI fix attempt: '$latest_commit_msg'. Skipping."
+    return 1
+  fi
+
+  # Loop prevention layer 2: tracking file check
+  local tracking_file="$SETTINGS_DIR/ci-fix-tracking.json"
+  if [ -f "$tracking_file" ]; then
+    local head_sha
+    head_sha=$(git rev-parse "origin/$branch_name" 2>/dev/null) || true
+    if [ -n "$head_sha" ]; then
+      local tracked_sha
+      tracked_sha=$(jq -r --arg b "$branch_name" '.[$b] // empty' "$tracking_file" 2>/dev/null) || true
+      if [ "$tracked_sha" = "$head_sha" ]; then
+        log_err "  [ci-check] HEAD SHA $head_sha already tracked for branch $branch_name. Skipping."
+        return 1
+      fi
+    fi
+  fi
+
+  # Get check statuses
+  local checks_json
+  checks_json=$(gh pr checks "$pr_number" --json name,state,bucket 2>/dev/null) || true
+  if [ -z "$checks_json" ] || [ "$checks_json" = "[]" ] || [ "$checks_json" = "null" ]; then
+    log_err "  [ci-check] No checks found for PR #$pr_number"
+    return 1
+  fi
+
+  # Loop prevention layer 3: skip if any checks are still pending
+  local pending_count
+  pending_count=$(echo "$checks_json" | jq '[.[] | select(.bucket == "pending" or .state == "PENDING" or .state == "QUEUED" or .state == "IN_PROGRESS")] | length' 2>/dev/null) || pending_count=0
+  if [ "$pending_count" -gt 0 ]; then
+    log_err "  [ci-check] $pending_count check(s) still pending for PR #$pr_number. Skipping."
+    return 1
+  fi
+
+  # Count failures
+  local fail_count
+  fail_count=$(echo "$checks_json" | jq '[.[] | select(.bucket == "fail" or .state == "FAILURE" or .state == "ERROR")] | length' 2>/dev/null) || fail_count=0
+  log_err "  [ci-check] Failed checks: $fail_count"
+
+  if [ "$fail_count" -gt 0 ]; then
+    echo "$pr_number"
+    return 0
+  fi
+
+  log_err "  [ci-check] No CI failures for PR #$pr_number."
+  return 1
+}
+
+# Collect CI failure details for a PR (plain text output for Claude prompt)
+get_ci_failure_details() {
+  local work_dir="$1"
+  local pr_number="$2"
+
+  cd "$work_dir"
+
+  log_err "  [ci-details] Collecting CI failure details for PR #$pr_number..."
+
+  local branch_name
+  branch_name=$(gh pr view "$pr_number" --json headRefName --jq '.headRefName' 2>/dev/null) || true
+
+  # Get failed check names
+  local failed_checks
+  failed_checks=$(gh pr checks "$pr_number" --json name,state,bucket --jq '[.[] | select(.bucket == "fail" or .state == "FAILURE" or .state == "ERROR")] | .[].name' 2>/dev/null) || true
+
+  echo "## Failed Checks"
+  echo "$failed_checks"
+  echo ""
+
+  # Find failed GitHub Actions runs on this branch for the HEAD commit
+  local head_sha
+  head_sha=$(git rev-parse "origin/$branch_name" 2>/dev/null) || true
+
+  if [ -z "$head_sha" ]; then
+    log_err "  [ci-details] Could not determine HEAD SHA for branch $branch_name"
+    echo "## Failure Logs"
+    echo "(Could not determine HEAD SHA to fetch logs)"
+    return 0
+  fi
+
+  local failed_runs
+  failed_runs=$(gh run list --branch "$branch_name" --status failure --json databaseId,headSha,name --jq "[.[] | select(.headSha == \"$head_sha\")] | .[].databaseId" 2>/dev/null) || true
+
+  if [ -z "$failed_runs" ]; then
+    log_err "  [ci-details] No failed runs found for HEAD commit $head_sha"
+    echo "## Failure Logs"
+    echo "(No failed GitHub Actions runs found for HEAD commit)"
+    return 0
+  fi
+
+  echo "## Failure Logs"
+  echo ""
+
+  for run_id in $failed_runs; do
+    local run_name
+    run_name=$(gh run view "$run_id" --json name --jq '.name' 2>/dev/null) || run_name="Run $run_id"
+    echo "### $run_name (run $run_id)"
+    echo '```'
+    gh run view "$run_id" --log-failed 2>/dev/null | tail -200
+    echo '```'
+    echo ""
+  done
+}
+
 # Fetch all non-resolved, non-outdated PR comments for review context
 get_pr_review_comments() {
   local work_dir="$1"
@@ -592,24 +780,65 @@ get_pr_review_comments() {
 
   log_err "  [comments] Fetching review comments for PR #$pr_number..."
 
-  # Get review comments (inline code comments) - non-outdated only
-  gh api "repos/{owner}/{repo}/pulls/$pr_number/comments" --jq '
-    [.[] | select(.position != null or .line != null) | {
-      author: .user.login,
-      path: .path,
-      line: (.line // .original_line),
-      body: .body,
-      created_at: .created_at
-    }]
-  ' > "$tmpdir/review_comments.json" 2>/dev/null || echo "[]" > "$tmpdir/review_comments.json"
+  # Get review comments via GraphQL - only unresolved, non-outdated threads
+  local repo_nwo
+  repo_nwo=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null) || repo_nwo=""
+  local repo_owner="${repo_nwo%%/*}"
+  local repo_name="${repo_nwo##*/}"
+
+  if [ -n "$repo_owner" ] && [ -n "$repo_name" ]; then
+    gh api graphql -f query='
+      query($owner: String!, $name: String!, $pr: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $pr) {
+            reviewThreads(first: 100) {
+              nodes {
+                isResolved
+                isOutdated
+                comments(first: 50) {
+                  nodes {
+                    databaseId
+                    author { login }
+                    path
+                    line
+                    originalLine
+                    body
+                    createdAt
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ' -f owner="$repo_owner" -f name="$repo_name" -F pr="$pr_number" 2>/dev/null | jq '
+      [(.data.repository.pullRequest.reviewThreads.nodes // [])[]
+       | select(.isResolved == false and .isOutdated == false)
+       | (.comments.nodes // [])[]
+       | select(.body | startswith("🤖 **eternity-loop bot:**") | not)
+       | {
+           id: .databaseId,
+           author: .author.login,
+           path: .path,
+           line: (.line // .originalLine),
+           body: .body,
+           created_at: .createdAt
+         }
+      ]
+    ' > "$tmpdir/review_comments.json" 2>/dev/null || echo "[]" > "$tmpdir/review_comments.json"
+  else
+    log_err "  [comments] WARNING: Could not determine repo owner/name, skipping inline review comments"
+    echo "[]" > "$tmpdir/review_comments.json"
+  fi
 
   local rc_count
   rc_count=$(jq 'length' "$tmpdir/review_comments.json" 2>/dev/null || echo 0)
-  log_err "  [comments] Inline review comments (non-outdated): $rc_count"
+  log_err "  [comments] Inline review comments (unresolved, non-outdated): $rc_count"
 
-  # Get issue comments (top-level PR comments)
+  # Get issue comments (top-level PR comments) - exclude bot replies
   gh api "repos/{owner}/{repo}/issues/$pr_number/comments" --jq '
-    [.[] | {
+    [.[] | select(.body | startswith("🤖 **eternity-loop bot:**") | not) | {
+      id: .id,
       author: .user.login,
       body: .body,
       created_at: .created_at
@@ -618,11 +847,12 @@ get_pr_review_comments() {
 
   local ic_count
   ic_count=$(jq 'length' "$tmpdir/issue_comments.json" 2>/dev/null || echo 0)
-  log_err "  [comments] Top-level PR comments: $ic_count"
+  log_err "  [comments] Top-level PR comments (excluding bot): $ic_count"
 
   # Get PR reviews with body text
   gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" --jq '
     [.[] | select(.body != null and .body != "") | {
+      id: .id,
       author: .user.login,
       state: .state,
       body: .body,
@@ -662,13 +892,7 @@ check_review_tasks() {
 
   # Fetch all prd-labeled issues via GraphQL
   local filter
-  filter=$(jq -n --arg tid "$team_id" '{
-    team: {id: {eq: $tid}},
-    labels: {some: {name: {eq: "prd"}}}
-  }')
-  if [ -n "$project_id" ]; then
-    filter=$(echo "$filter" | jq --arg pid "$project_id" '. + {project: {id: {eq: $pid}}}')
-  fi
+  filter=$(build_issue_filter "$team_id" "$project_id" '{"labels": {"some": {"name": {"eq": "prd"}}}}')
 
   local query='query($filter: IssueFilter!) {
     issues(filter: $filter, first: 50) {
@@ -768,17 +992,10 @@ start_review_task() {
   local issue_json="$2"
   local ralph_dir="$work_dir/scripts/ralph"
 
+  local issue_id issue_title issue_url branch_name
+  parse_issue_fields "$issue_json"
   local pr_number
-  pr_number=$(echo "$issue_json" | jq -r '.prNumber')
-  local issue_id
-  issue_id=$(echo "$issue_json" | jq -r '.identifier // .id')
-  local issue_title
-  issue_title=$(echo "$issue_json" | jq -r '.title')
-  local issue_url
-  issue_url=$(echo "$issue_json" | jq -r '.url // ""')
-  local branch_name
-  branch_name=$(echo "$issue_json" | jq -r '.branchName // empty')
-  [ -z "$branch_name" ] && branch_name="ralph/${issue_id}"
+  pr_number=$(printf '%s' "$issue_json" | jq -r '.prNumber')
 
   log_err "[start-review] Generating review-addressing PRD for $issue_id (PR #$pr_number)..."
   log_err "[start-review] Issue: $issue_title"
@@ -796,43 +1013,211 @@ start_review_task() {
   # Clean working tree and check out the branch
   clean_working_tree "$work_dir"
   log_err "[start-review] Checking out branch $branch_name..."
-  git checkout "$branch_name" 2>/dev/null || git checkout -b "$branch_name" "origin/$branch_name"
+  if ! git checkout "$branch_name" 2>/dev/null; then
+    log_err "[start-review] Branch $branch_name not found locally, creating from origin..."
+    git checkout -b "$branch_name" "origin/$branch_name" || {
+      log_err "[start-review] ERROR: Could not check out branch $branch_name"
+      return 1
+    }
+  fi
   git pull origin "$branch_name" --ff-only 2>/dev/null || true
   log_err "[start-review] On branch: $(git branch --show-current), latest commit: $(git log -1 --format='%h %s')"
   log_err "[start-review] Invoking Claude to generate review prd.json..."
 
-  claude --dangerously-skip-permissions --print -p "You need to create a prd.json to address PR review feedback.
+  claude --dangerously-skip-permissions --print -p "$(read_prompt create-review-prd.md)
 
-## Original Linear Issue (for reference only)
+Save to: $ralph_dir/prd.json
+branchName: $branch_name
+project: \"$issue_id: $issue_title (review feedback)\"
+
+## Linear Issue (for context only)
 - ID: $issue_id
 - Title: $issue_title
 - URL: $issue_url
 
 ## PR #$pr_number Review Comments
-These are ALL non-resolved, non-outdated comments from the PR. Address all of them.
 
 $comments
 
-## Instructions
-Use the /ralph skill to create a prd.json at $ralph_dir/prd.json that addresses the review feedback above.
+$RALPH_SKILL_GUIDELINES" 2>&1 | tee /dev/stderr || true
 
-Important:
-- The prd.json should create user stories for each piece of review feedback that needs code changes
-- Use the existing branch name: $branch_name
-- The project name should reference the original issue: \"$issue_id: $issue_title (review feedback)\"
-- Group related comments into single user stories where appropriate
-- Include the original comment text in the user story description for context
-- The original Linear issue is provided only for context - focus on the PR review comments" 2>&1 | tee /dev/stderr || true
+  verify_prd "$ralph_dir/prd.json" "start-review" || return 1
+  return 0
+}
 
-  # Verify prd.json was created
-  if [ ! -f "$ralph_dir/prd.json" ]; then
-    log_err "[start-review] ERROR: prd.json was not generated at $ralph_dir/prd.json"
+# --- CI Failure Handling: Check PRs for CI failures and attempt fixes ---
+
+# Find "In Review"/"In Progress" Linear issues with CI failures on their PRs
+# Returns issue JSON on success, 1 on failure
+check_ci_tasks() {
+  local team_id="$1"
+  local work_dir="$2"
+  local project_id="${3:-}"
+
+  log_err "[ci] Checking for issues with CI failures on PRs..."
+
+  # Same query as review tasks: prd-labeled issues in review/progress states
+  local filter
+  filter=$(build_issue_filter "$team_id" "$project_id" '{"labels": {"some": {"name": {"eq": "prd"}}}}')
+
+  local query='query($filter: IssueFilter!) {
+    issues(filter: $filter, first: 50) {
+      nodes { id identifier title description url branchName state { name } }
+    }
+  }'
+  local variables
+  variables=$(jq -n --argjson f "$filter" '{filter: $f}')
+  log_err "[ci] Querying Linear API..."
+  local result
+  result=$(linear_graphql "$query" "$variables")
+
+  # Filter to issues with status containing "review" or "progress"
+  local issues
+  issues=$(echo "$result" | jq '[.data.issues.nodes[] | select(.state.name | test("review|progress"; "i"))]')
+
+  if [ -z "$issues" ] || [ "$issues" = "[]" ] || [ "$issues" = "null" ]; then
+    log_err "[ci] No 'In Review'/'In Progress' issues found."
     return 1
   fi
 
-  log_err "[start-review] prd.json generated successfully at $ralph_dir/prd.json"
-  log_err "[start-review] PRD contents:"
-  jq '.' "$ralph_dir/prd.json" >&2 2>/dev/null || cat "$ralph_dir/prd.json" >&2
+  local count
+  count=$(echo "$issues" | jq 'length')
+  log_err "[ci] Found $count candidate issue(s). Checking for CI failures..."
+
+  for idx in $(seq 0 $((count - 1))); do
+    local issue_json
+    issue_json=$(echo "$issues" | jq -c ".[$idx]")
+    local issue_id
+    issue_id=$(echo "$issue_json" | jq -r '.identifier // .id')
+    local issue_title
+    issue_title=$(echo "$issue_json" | jq -r '.title // ""')
+
+    log_err "[ci] Checking issue $((idx + 1))/$count: $issue_id - $issue_title"
+
+    # Find the PR for this issue by searching for the issue identifier in PR titles
+    cd "$work_dir"
+    log_err "  [ci] Searching for PR related to $issue_id..."
+    local pr_json
+    pr_json=$(gh pr list --state open --json number,headRefName,title --jq "
+      [.[] | select(.title | ascii_downcase | contains(\"$issue_id\" | ascii_downcase))] | .[0] // empty
+    " 2>/dev/null) || true
+
+    # Fall back: search by Linear branch name
+    if [ -z "$pr_json" ] || [ "$pr_json" = "null" ]; then
+      local linear_branch
+      linear_branch=$(echo "$issue_json" | jq -r '.branchName // empty')
+      if [ -n "$linear_branch" ]; then
+        log_err "  [ci] No PR found by title. Trying Linear branch: $linear_branch"
+        pr_json=$(gh pr list --head "$linear_branch" --state open --json number,headRefName,title --jq '.[0] // empty' 2>/dev/null) || true
+      fi
+    fi
+
+    if [ -z "$pr_json" ] || [ "$pr_json" = "null" ]; then
+      log_err "  [ci] No open PR found for $issue_id. Skipping."
+      continue
+    fi
+
+    local pr_number
+    pr_number=$(echo "$pr_json" | jq -r '.number')
+    local branch_name
+    branch_name=$(echo "$pr_json" | jq -r '.headRefName')
+    log_err "  [ci] Found PR #$pr_number (branch: $branch_name)"
+
+    # Fetch remote to ensure we have latest
+    log_err "  [ci] Fetching origin/$branch_name..."
+    if ! git fetch origin "$branch_name" 2>/dev/null; then
+      log_err "  [ci] Branch $branch_name not found on remote. Skipping."
+      continue
+    fi
+
+    # Check for CI failures
+    local verified_pr
+    verified_pr=$(check_pr_has_ci_failures "$work_dir" "$branch_name") || {
+      log_err "  [ci] No actionable CI failures for $issue_id. Skipping."
+      continue
+    }
+
+    log_err "[ci] >>> Found CI failures on PR #$pr_number for $issue_id! Processing..."
+
+    echo "$issue_json" | jq -c ". + {\"prNumber\": $pr_number, \"branchName\": \"$branch_name\"}"
+    return 0
+  done
+
+  log_err "[ci] No issues have actionable CI failures."
+  return 1
+}
+
+# Generate a CI-fix prd.json from failure logs
+start_ci_fix_task() {
+  local work_dir="$1"
+  local issue_json="$2"
+  local ralph_dir="$work_dir/scripts/ralph"
+
+  local issue_id issue_title issue_url branch_name
+  parse_issue_fields "$issue_json"
+  local pr_number
+  pr_number=$(printf '%s' "$issue_json" | jq -r '.prNumber')
+
+  log_err "[start-ci-fix] Generating CI-fix PRD for $issue_id (PR #$pr_number)..."
+  log_err "[start-ci-fix] Branch: $branch_name"
+
+  mkdir -p "$ralph_dir"
+
+  # Collect CI failure details
+  log_err "[start-ci-fix] Collecting CI failure details..."
+  local failure_details
+  failure_details=$(get_ci_failure_details "$work_dir" "$pr_number")
+  log_err "[start-ci-fix] CI failure details collected."
+
+  # Clean working tree and check out the branch
+  clean_working_tree "$work_dir"
+  log_err "[start-ci-fix] Checking out branch $branch_name..."
+  if ! git checkout "$branch_name" 2>/dev/null; then
+    log_err "[start-ci-fix] Branch $branch_name not found locally, creating from origin..."
+    git checkout -b "$branch_name" "origin/$branch_name" || {
+      log_err "[start-ci-fix] ERROR: Could not check out branch $branch_name"
+      return 1
+    }
+  fi
+  git pull origin "$branch_name" --ff-only 2>/dev/null || true
+  log_err "[start-ci-fix] On branch: $(git branch --show-current), latest commit: $(git log -1 --format='%h %s')"
+
+  # Record fix attempt in tracking file BEFORE generating PRD
+  local tracking_file="$SETTINGS_DIR/ci-fix-tracking.json"
+  local head_sha
+  head_sha=$(git rev-parse HEAD 2>/dev/null) || true
+  if [ -n "$head_sha" ]; then
+    mkdir -p "$SETTINGS_DIR"
+    if [ -f "$tracking_file" ]; then
+      local updated
+      updated=$(jq --arg b "$branch_name" --arg s "$head_sha" '.[$b] = $s' "$tracking_file" 2>/dev/null) || updated="{\"$branch_name\": \"$head_sha\"}"
+      echo "$updated" > "$tracking_file"
+    else
+      echo "{\"$branch_name\": \"$head_sha\"}" > "$tracking_file"
+    fi
+    log_err "[start-ci-fix] Recorded fix attempt: $branch_name -> $head_sha"
+  fi
+
+  log_err "[start-ci-fix] Invoking Claude to generate CI-fix prd.json..."
+
+  claude --dangerously-skip-permissions --print -p "$(read_prompt create-ci-fix-prd.md)
+
+Save to: $ralph_dir/prd.json
+branchName: $branch_name
+project: \"$issue_id: $issue_title (CI fix)\"
+
+## Linear Issue (for context only)
+- ID: $issue_id
+- Title: $issue_title
+- URL: $issue_url
+
+## CI Failure Details
+
+$failure_details
+
+$RALPH_SKILL_GUIDELINES" 2>&1 | tee /dev/stderr || true
+
+  verify_prd "$ralph_dir/prd.json" "start-ci-fix" || return 1
   return 0
 }
 
@@ -877,15 +1262,30 @@ while true; do
 
   # --- Priority 1: Check for "In Review" issues with new PR reviews ---
   log "[loop] Priority 1: Checking for issues with new PR reviews..."
-  REVIEW_JSON=$(check_review_tasks "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID") || true
+  REVIEW_JSON=""
+  set +e
+  REVIEW_JSON=$(check_review_tasks "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID")
+  REVIEW_EXIT=$?
+  set -e
+  log "[loop] check_review_tasks exited with status $REVIEW_EXIT"
 
   if [ -n "$REVIEW_JSON" ]; then
     TASK_TYPE="review"
     ISSUE_JSON="$REVIEW_JSON"
-    ISSUE_ID=$(echo "$ISSUE_JSON" | jq -r '.identifier // .id')
-    BRANCH_NAME=$(echo "$ISSUE_JSON" | jq -r '.branchName // empty')
-    [ -z "$BRANCH_NAME" ] && BRANCH_NAME="ralph/${ISSUE_ID}"
+    log "[loop] Review JSON received ($(printf '%s' "$ISSUE_JSON" | wc -c | tr -d ' ') bytes)"
+    set +e
+    parse_issue_fields "$ISSUE_JSON"
+    PARSE_EXIT=$?
+    set -e
+    if [ "$PARSE_EXIT" -ne 0 ]; then
+      log "[loop] ERROR: parse_issue_fields failed with status $PARSE_EXIT. Skipping..."
+      sleep "$POLL_INTERVAL"
+      continue
+    fi
+    ISSUE_ID="$issue_id"
+    BRANCH_NAME="$branch_name"
     PR_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.prNumber')
+    log "[loop] Parsed review task: issue=$ISSUE_ID branch=$BRANCH_NAME pr=#$PR_NUMBER"
 
     log ""
     log "============================================="
@@ -895,21 +1295,68 @@ while true; do
 
     # Checkout the existing branch and generate review prd.json
     cd "$WORK_DIR"
+    log "[loop] Starting review task..."
     start_review_task "$WORK_DIR" "$ISSUE_JSON" || {
       log "[loop] Failed to generate review PRD. Skipping..."
       sleep "$POLL_INTERVAL"
       continue
     }
+    log "[loop] Review task PRD generated successfully."
   fi
 
-  # --- Priority 2: Check for new "Todo" issues ---
+  # --- Priority 2: Check for CI failures on existing PRs ---
   if [ -z "$TASK_TYPE" ]; then
-    log "[loop] No review tasks found. Priority 2: Checking for 'Todo' issues..."
+    log "[loop] Priority 2: Checking for CI failures on PRs..."
+    CI_JSON=""
+    set +e
+    CI_JSON=$(check_ci_tasks "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID")
+    CI_EXIT=$?
+    set -e
+    log "[loop] check_ci_tasks exited with status $CI_EXIT"
+
+    if [ -n "$CI_JSON" ]; then
+      TASK_TYPE="ci-fix"
+      ISSUE_JSON="$CI_JSON"
+      log "[loop] CI fix JSON received ($(printf '%s' "$ISSUE_JSON" | wc -c | tr -d ' ') bytes)"
+      set +e
+      parse_issue_fields "$ISSUE_JSON"
+      PARSE_EXIT=$?
+      set -e
+      if [ "$PARSE_EXIT" -ne 0 ]; then
+        log "[loop] ERROR: parse_issue_fields failed with status $PARSE_EXIT. Skipping..."
+        sleep "$POLL_INTERVAL"
+        continue
+      fi
+      ISSUE_ID="$issue_id"
+      BRANCH_NAME="$branch_name"
+      PR_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.prNumber')
+      log "[loop] Parsed CI fix task: issue=$ISSUE_ID branch=$BRANCH_NAME pr=#$PR_NUMBER"
+
+      log ""
+      log "============================================="
+      log "  Fixing CI failures: $ISSUE_ID (PR #$PR_NUMBER)"
+      log "  Branch: $BRANCH_NAME"
+      log "============================================="
+
+      cd "$WORK_DIR"
+      log "[loop] Starting CI fix task..."
+      start_ci_fix_task "$WORK_DIR" "$ISSUE_JSON" || {
+        log "[loop] Failed to generate CI fix PRD. Skipping..."
+        sleep "$POLL_INTERVAL"
+        continue
+      }
+      log "[loop] CI fix task PRD generated successfully."
+    fi
+  fi
+
+  # --- Priority 3: Check for new "Todo" issues ---
+  if [ -z "$TASK_TYPE" ]; then
+    log "[loop] No review or CI fix tasks found. Priority 3: Checking for 'Todo' issues..."
 
     ISSUE_JSON=$(start_task "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID") || true
 
     if [ -z "$ISSUE_JSON" ]; then
-      log "[loop] No tasks found (review or todo). Polling again in ${POLL_INTERVAL}s..."
+      log "[loop] No tasks found (review, ci-fix, or todo). Polling again in ${POLL_INTERVAL}s..."
       sleep "$POLL_INTERVAL"
       continue
     fi
@@ -918,9 +1365,9 @@ while true; do
     ensure_main_branch "$WORK_DIR"
 
     TASK_TYPE="new"
-    ISSUE_ID=$(echo "$ISSUE_JSON" | jq -r '.identifier // .id')
-    BRANCH_NAME=$(echo "$ISSUE_JSON" | jq -r '.branchName // empty')
-    [ -z "$BRANCH_NAME" ] && BRANCH_NAME="ralph/${ISSUE_ID}"
+    parse_issue_fields "$ISSUE_JSON"
+    ISSUE_ID="$issue_id"
+    BRANCH_NAME="$branch_name"
 
     log ""
     log "============================================="
@@ -939,91 +1386,9 @@ while true; do
   # (branch management is handled by this script)
   ralph_dir="$WORK_DIR/scripts/ralph"
   mkdir -p "$ralph_dir"
-  cat > "$ralph_dir/CLAUDE.md" <<'RALPH_PROMPT'
-# Ralph Agent Instructions
-
-You are an autonomous coding agent working on a software project.
-
-## Your Task
-
-1. Read the PRD at `prd.json` (in the same directory as this file)
-2. Read the progress log at `progress.txt` (check Codebase Patterns section first)
-3. Stay on the current branch. Do NOT create, switch, or check out any branches.
-4. Pick the **highest priority** user story where `passes: false`
-5. Implement that single user story
-6. Run quality checks (e.g., typecheck, lint, test - use whatever your project requires)
-7. Update CLAUDE.md files if you discover reusable patterns (see below)
-8. If checks pass, commit ALL changes with message: `feat: [Story ID] - [Story Title]`
-9. Update the PRD to set `passes: true` for the completed story
-10. Append your progress to `progress.txt`
-
-## Progress Report Format
-
-APPEND to progress.txt (never replace, always append):
-```
-## [Date/Time] - [Story ID]
-- What was implemented
-- Files changed
-- **Learnings for future iterations:**
-  - Patterns discovered (e.g., "this codebase uses X for Y")
-  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
-  - Useful context (e.g., "the evaluation panel is in component X")
----
-```
-
-The learnings section is critical - it helps future iterations avoid repeating mistakes and understand the codebase better.
-
-## Consolidate Patterns
-
-If you discover a **reusable pattern** that future iterations should know, add it to the `## Codebase Patterns` section at the TOP of progress.txt (create it if it doesn't exist). This section should consolidate the most important learnings:
-
-```
-## Codebase Patterns
-- Example: Use `sql<number>` template for aggregations
-- Example: Always use `IF NOT EXISTS` for migrations
-- Example: Export types from actions.ts for UI components
-```
-
-Only add patterns that are **general and reusable**, not story-specific details.
-
-## Update CLAUDE.md Files
-
-Before committing, check if any edited files have learnings worth preserving in nearby CLAUDE.md files:
-
-1. **Identify directories with edited files** - Look at which directories you modified
-2. **Check for existing CLAUDE.md** - Look for CLAUDE.md in those directories or parent directories
-3. **Add valuable learnings** - If you discovered something future developers/agents should know
-
-**Do NOT add:**
-- Story-specific implementation details
-- Temporary debugging notes
-- Information already in progress.txt
-
-## Quality Requirements
-
-- ALL commits must pass your project's quality checks (typecheck, lint, test)
-- Do NOT commit broken code
-- Keep changes focused and minimal
-- Follow existing code patterns
-
-## Stop Condition
-
-After completing a user story, check if ALL stories have `passes: true`.
-
-If ALL stories are complete and passing, reply with:
-<promise>COMPLETE</promise>
-
-If there are still stories with `passes: false`, end your response normally (another iteration will pick up the next story).
-
-## Important
-
-- Work on ONE story per iteration
-- Commit frequently
-- Keep CI green
-- Do NOT switch branches - stay on the current branch at all times
-- Read the Codebase Patterns section in progress.txt before starting
-RALPH_PROMPT
-  log "[loop] Wrote scripts/ralph/CLAUDE.md (no branch management)"
+  # Copy ralph CLAUDE.md with branch override (step 3 changed from upstream)
+  cp "$PROMPTS_DIR/ralph-claude-md.md" "$ralph_dir/CLAUDE.md"
+  log "[loop] Wrote scripts/ralph/CLAUDE.md (branch override)"
 
   # Run ralph-loop.sh from the project directory
   log ""
@@ -1041,6 +1406,24 @@ RALPH_PROMPT
     log "[loop] Pushing review fixes to origin..."
     git push origin "$(git branch --show-current)" 2>/dev/null || true
     log "[loop] Pushed review fixes to PR #$PR_NUMBER."
+
+    # Reply to each PR comment explaining how it was addressed
+    log "[loop] Replying to PR comments on PR #$PR_NUMBER..."
+    review_comments=$(get_pr_review_comments "$WORK_DIR" "$PR_NUMBER")
+    claude --dangerously-skip-permissions --print -p "$(sed "s/PR_NUMBER/$PR_NUMBER/g" "$PROMPTS_DIR/reply-to-pr-comments.md")
+
+## PR #$PR_NUMBER Review Comments
+$review_comments
+
+## Recent commits addressing this feedback
+$(cd "$WORK_DIR" && git log --oneline -20)" 2>&1 | tee /dev/stderr || true
+    log "[loop] Finished replying to PR comments."
+  elif [ "$TASK_TYPE" = "ci-fix" ]; then
+    # For CI fix tasks: push updates to the existing PR (no comment replies needed)
+    cd "$WORK_DIR"
+    log "[loop] Pushing CI fixes to origin..."
+    git push origin "$(git branch --show-current)" 2>/dev/null || true
+    log "[loop] Pushed CI fixes to PR #$PR_NUMBER."
   else
     # For new tasks: create PR based on exit status
     if [ "$RALPH_EXIT" -eq 0 ]; then

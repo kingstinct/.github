@@ -1,7 +1,7 @@
 ---
 name: ralph
 description: "Convert PRDs to prd.json format for the Ralph autonomous agent system. Use when you have an existing PRD and need to convert it to Ralph's JSON format. Triggers on: convert this prd, turn this into ralph format, create prd.json from this, ralph json."
-user-invocable: true
+user-invokable: true
 ---
 
 # Ralph PRD Converter
@@ -21,6 +21,7 @@ Take a PRD (markdown file or text) and convert it to `prd.json` in your ralph di
 ```json
 {
   "project": "[Project Name]",
+  "branchName": "[branch-name-from-context]",
   "description": "[Feature description from PRD title/intro]",
   "userStories": [
     {
@@ -111,7 +112,7 @@ For stories with testable logic, also include:
 "Verify in browser using dev-browser skill"
 ```
 
-Frontend stories are NOT complete until visually verified. Ralph will use the dev-browser skill to navigate to the page, interact with the UI, and confirm changes work.
+Frontend stories are NOT complete until visually verified. Ralph will use the dev-browser skill to navigate to the page, interact with the UI, and confirm changes work. If it's a mobile project with Expo also use the simulator tools to verify, similar as you would with dev-browser.
 
 ---
 
@@ -121,7 +122,8 @@ Frontend stories are NOT complete until visually verified. Ralph will use the de
 2. **IDs**: Sequential (US-001, US-002, etc.)
 3. **Priority**: Based on dependency order, then document order
 4. **All stories**: `passes: false` and empty `notes`
-5. **Always add**: "Typecheck passes" to every story's acceptance criteria
+5. **branchName**: Use the branch name provided in the context (e.g., from Linear or the PR). If none is provided, derive from feature name in kebab-case prefixed with `ralph/`
+6. **Always add**: "Typecheck passes" to every story's acceptance criteria
 
 ---
 
@@ -163,6 +165,7 @@ Add ability to mark tasks with different statuses.
 ```json
 {
   "project": "TaskApp",
+  "branchName": "ralph/task-status",
   "description": "Task Status Feature - Track task progress with status indicators",
   "userStories": [
     {
@@ -232,7 +235,7 @@ Add ability to mark tasks with different statuses.
 **Before writing a new prd.json, check if there is an existing one from a different feature:**
 
 1. Read the current `prd.json` if it exists
-2. Check if the project/description differs from the new feature
+2. Check if `branchName` differs from the new feature's branch name
 3. If different AND `progress.txt` has content beyond the header:
    - Create archive folder: `archive/YYYY-MM-DD-feature-name/`
    - Copy current `prd.json` and `progress.txt` to archive
@@ -246,7 +249,7 @@ Add ability to mark tasks with different statuses.
 
 Before writing prd.json, verify:
 
-- [ ] **Previous run archived** (if prd.json exists with different project, archive it first)
+- [ ] **Previous run archived** (if prd.json exists with different branchName, archive it first)
 - [ ] Each story is completable in one iteration (small enough)
 - [ ] Stories are ordered by dependency (schema to backend to UI)
 - [ ] Every story has "Typecheck passes" as criterion
