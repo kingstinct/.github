@@ -112,7 +112,7 @@ For stories with testable logic, also include:
 "Verify in browser using dev-browser skill"
 ```
 
-Frontend stories are NOT complete until visually verified. Ralph will use the dev-browser skill to navigate to the page, interact with the UI, and confirm changes work.
+Frontend stories are NOT complete until visually verified. Ralph will use the dev-browser skill to navigate to the page, interact with the UI, and confirm changes work. If it's a mobile project with Expo also use the simulator tools to verify, similar as you would with dev-browser.
 
 ---
 
