@@ -592,6 +592,7 @@ check_pr_has_new_human_comments() {
                 comments(first: 50) {
                   nodes {
                     author { login }
+                    body
                     createdAt
                   }
                 }
@@ -604,23 +605,25 @@ check_pr_has_new_human_comments() {
       [(.data.repository.pullRequest.reviewThreads.nodes // [])[]
        | select(.isResolved == false and .isOutdated == false)
        | (.comments.nodes // [])[]
-       | select(.createdAt > $cutoff and (.author.login != "copilot" and .author.login != "github-actions[bot]"))
+       | select(.createdAt > $cutoff
+         and (.author.login != "copilot" and .author.login != "github-actions[bot]")
+         and (.body | startswith("🤖 **eternity-loop bot:**") | not))
       ] | length
     ' 2>/dev/null) || true
   fi
   log_err "  [review-check] New human inline comments (unresolved): ${new_review_comments:-0}"
 
-  # Check top-level issue comments
+  # Check top-level issue comments (exclude bot replies by body prefix)
   local new_issue_comments
   new_issue_comments=$(gh api "repos/{owner}/{repo}/issues/$pr_number/comments" --jq "
-    [.[] | select($human_filter and .created_at > \"$latest_commit_date\")] | length
+    [.[] | select($human_filter and .created_at > \"$latest_commit_date\" and (.body | startswith(\"🤖 **eternity-loop bot:**\") | not))] | length
   " 2>/dev/null) || true
   log_err "  [review-check] New human top-level comments: ${new_issue_comments:-0}"
 
-  # Check review submissions with body text
+  # Check review submissions with body text (exclude bot replies by body prefix)
   local new_reviews
   new_reviews=$(gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" --jq "
-    [.[] | select($human_filter and .body != null and .body != \"\" and .submitted_at > \"$latest_commit_date\")] | length
+    [.[] | select($human_filter and .body != null and .body != \"\" and .submitted_at > \"$latest_commit_date\" and (.body | startswith(\"🤖 **eternity-loop bot:**\") | not))] | length
   " 2>/dev/null) || true
   log_err "  [review-check] New human review submissions: ${new_reviews:-0}"
 
