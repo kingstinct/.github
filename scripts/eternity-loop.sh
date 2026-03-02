@@ -7,11 +7,12 @@
 #
 # Workflow:
 # 1. Setup: detect Linear team + project (via Linear GraphQL API)
-# 2. Check for "In Review"/"In Progress" issues with new PR comments (via Linear API, prioritized)
-# 3. If no reviews: fetch next "Todo" issue via Linear API, mark in progress, create branch, generate prd.json (Claude call)
-# 4. Run ralph-loop.sh to execute the PRD
-# 5. Finalize: push branch and create GitHub PR (single Claude call)
-# 6. Repeat
+# 2. Priority 1: Check for "In Review"/"In Progress" issues with new PR comments (via Linear API)
+# 3. Priority 2: Check for CI failures on existing PRs and attempt auto-fix
+# 4. Priority 3: Fetch next "Todo" issue via Linear API, mark in progress, create branch, generate prd.json
+# 5. Run ralph-loop.sh to execute the PRD
+# 6. Finalize: push branch and create GitHub PR (or push fixes to existing PR)
+# 7. Repeat
 
 set -euo pipefail
 
@@ -637,6 +638,137 @@ check_pr_has_new_human_comments() {
   return 1
 }
 
+# Check if a PR has CI failures (and is eligible for auto-fix)
+# Returns 0 if there are actionable CI failures, 1 otherwise
+# Outputs the PR number on success
+# Loop prevention:
+#   1. Skip if latest commit message starts with "fix(ci):" (already attempted)
+#   2. Tracking file maps {branch: headSHA} — skip if HEAD hasn't changed since last attempt
+#   3. Pending checks gate — skip if any checks are still pending
+check_pr_has_ci_failures() {
+  local work_dir="$1"
+  local branch_name="$2"
+
+  cd "$work_dir"
+
+  # Find the PR for this branch
+  log_err "  [ci-check] Looking for PR with head branch: $branch_name"
+  local pr_number
+  pr_number=$(gh pr list --head "$branch_name" --json number --jq '.[0].number' 2>/dev/null) || true
+  if [ -z "$pr_number" ]; then
+    log_err "  [ci-check] No PR found for branch $branch_name"
+    return 1
+  fi
+  log_err "  [ci-check] Found PR #$pr_number for branch $branch_name"
+
+  # Loop prevention layer 1: check if latest commit starts with "fix(ci):"
+  local latest_commit_msg
+  latest_commit_msg=$(git log -1 --format="%s" "origin/$branch_name" 2>/dev/null) || true
+  if [[ "$latest_commit_msg" == fix\(ci\):* ]]; then
+    log_err "  [ci-check] Latest commit already a CI fix attempt: '$latest_commit_msg'. Skipping."
+    return 1
+  fi
+
+  # Loop prevention layer 2: tracking file check
+  local tracking_file="$SETTINGS_DIR/ci-fix-tracking.json"
+  if [ -f "$tracking_file" ]; then
+    local head_sha
+    head_sha=$(git rev-parse "origin/$branch_name" 2>/dev/null) || true
+    if [ -n "$head_sha" ]; then
+      local tracked_sha
+      tracked_sha=$(jq -r --arg b "$branch_name" '.[$b] // empty' "$tracking_file" 2>/dev/null) || true
+      if [ "$tracked_sha" = "$head_sha" ]; then
+        log_err "  [ci-check] HEAD SHA $head_sha already tracked for branch $branch_name. Skipping."
+        return 1
+      fi
+    fi
+  fi
+
+  # Get check statuses
+  local checks_json
+  checks_json=$(gh pr checks "$pr_number" --json name,state,bucket 2>/dev/null) || true
+  if [ -z "$checks_json" ] || [ "$checks_json" = "[]" ] || [ "$checks_json" = "null" ]; then
+    log_err "  [ci-check] No checks found for PR #$pr_number"
+    return 1
+  fi
+
+  # Loop prevention layer 3: skip if any checks are still pending
+  local pending_count
+  pending_count=$(echo "$checks_json" | jq '[.[] | select(.bucket == "pending" or .state == "PENDING" or .state == "QUEUED" or .state == "IN_PROGRESS")] | length' 2>/dev/null) || pending_count=0
+  if [ "$pending_count" -gt 0 ]; then
+    log_err "  [ci-check] $pending_count check(s) still pending for PR #$pr_number. Skipping."
+    return 1
+  fi
+
+  # Count failures
+  local fail_count
+  fail_count=$(echo "$checks_json" | jq '[.[] | select(.bucket == "fail" or .state == "FAILURE" or .state == "ERROR")] | length' 2>/dev/null) || fail_count=0
+  log_err "  [ci-check] Failed checks: $fail_count"
+
+  if [ "$fail_count" -gt 0 ]; then
+    echo "$pr_number"
+    return 0
+  fi
+
+  log_err "  [ci-check] No CI failures for PR #$pr_number."
+  return 1
+}
+
+# Collect CI failure details for a PR (plain text output for Claude prompt)
+get_ci_failure_details() {
+  local work_dir="$1"
+  local pr_number="$2"
+
+  cd "$work_dir"
+
+  log_err "  [ci-details] Collecting CI failure details for PR #$pr_number..."
+
+  local branch_name
+  branch_name=$(gh pr view "$pr_number" --json headRefName --jq '.headRefName' 2>/dev/null) || true
+
+  # Get failed check names
+  local failed_checks
+  failed_checks=$(gh pr checks "$pr_number" --json name,state,bucket --jq '[.[] | select(.bucket == "fail" or .state == "FAILURE" or .state == "ERROR")] | .[].name' 2>/dev/null) || true
+
+  echo "## Failed Checks"
+  echo "$failed_checks"
+  echo ""
+
+  # Find failed GitHub Actions runs on this branch for the HEAD commit
+  local head_sha
+  head_sha=$(git rev-parse "origin/$branch_name" 2>/dev/null) || true
+
+  if [ -z "$head_sha" ]; then
+    log_err "  [ci-details] Could not determine HEAD SHA for branch $branch_name"
+    echo "## Failure Logs"
+    echo "(Could not determine HEAD SHA to fetch logs)"
+    return 0
+  fi
+
+  local failed_runs
+  failed_runs=$(gh run list --branch "$branch_name" --status failure --json databaseId,headSha,name --jq "[.[] | select(.headSha == \"$head_sha\")] | .[].databaseId" 2>/dev/null) || true
+
+  if [ -z "$failed_runs" ]; then
+    log_err "  [ci-details] No failed runs found for HEAD commit $head_sha"
+    echo "## Failure Logs"
+    echo "(No failed GitHub Actions runs found for HEAD commit)"
+    return 0
+  fi
+
+  echo "## Failure Logs"
+  echo ""
+
+  for run_id in $failed_runs; do
+    local run_name
+    run_name=$(gh run view "$run_id" --json name --jq '.name' 2>/dev/null) || run_name="Run $run_id"
+    echo "### $run_name (run $run_id)"
+    echo '```'
+    gh run view "$run_id" --log-failed 2>/dev/null | tail -200
+    echo '```'
+    echo ""
+  done
+}
+
 # Fetch all non-resolved, non-outdated PR comments for review context
 get_pr_review_comments() {
   local work_dir="$1"
@@ -913,6 +1045,182 @@ $RALPH_SKILL_GUIDELINES" 2>&1 | tee /dev/stderr || true
   return 0
 }
 
+# --- CI Failure Handling: Check PRs for CI failures and attempt fixes ---
+
+# Find "In Review"/"In Progress" Linear issues with CI failures on their PRs
+# Returns issue JSON on success, 1 on failure
+check_ci_tasks() {
+  local team_id="$1"
+  local work_dir="$2"
+  local project_id="${3:-}"
+
+  log_err "[ci] Checking for issues with CI failures on PRs..."
+
+  # Same query as review tasks: prd-labeled issues in review/progress states
+  local filter
+  filter=$(build_issue_filter "$team_id" "$project_id" '{"labels": {"some": {"name": {"eq": "prd"}}}}')
+
+  local query='query($filter: IssueFilter!) {
+    issues(filter: $filter, first: 50) {
+      nodes { id identifier title description url branchName state { name } }
+    }
+  }'
+  local variables
+  variables=$(jq -n --argjson f "$filter" '{filter: $f}')
+  log_err "[ci] Querying Linear API..."
+  local result
+  result=$(linear_graphql "$query" "$variables")
+
+  # Filter to issues with status containing "review" or "progress"
+  local issues
+  issues=$(echo "$result" | jq '[.data.issues.nodes[] | select(.state.name | test("review|progress"; "i"))]')
+
+  if [ -z "$issues" ] || [ "$issues" = "[]" ] || [ "$issues" = "null" ]; then
+    log_err "[ci] No 'In Review'/'In Progress' issues found."
+    return 1
+  fi
+
+  local count
+  count=$(echo "$issues" | jq 'length')
+  log_err "[ci] Found $count candidate issue(s). Checking for CI failures..."
+
+  for idx in $(seq 0 $((count - 1))); do
+    local issue_json
+    issue_json=$(echo "$issues" | jq -c ".[$idx]")
+    local issue_id
+    issue_id=$(echo "$issue_json" | jq -r '.identifier // .id')
+    local issue_title
+    issue_title=$(echo "$issue_json" | jq -r '.title // ""')
+
+    log_err "[ci] Checking issue $((idx + 1))/$count: $issue_id - $issue_title"
+
+    # Find the PR for this issue by searching for the issue identifier in PR titles
+    cd "$work_dir"
+    log_err "  [ci] Searching for PR related to $issue_id..."
+    local pr_json
+    pr_json=$(gh pr list --state open --json number,headRefName,title --jq "
+      [.[] | select(.title | ascii_downcase | contains(\"$issue_id\" | ascii_downcase))] | .[0] // empty
+    " 2>/dev/null) || true
+
+    # Fall back: search by Linear branch name
+    if [ -z "$pr_json" ] || [ "$pr_json" = "null" ]; then
+      local linear_branch
+      linear_branch=$(echo "$issue_json" | jq -r '.branchName // empty')
+      if [ -n "$linear_branch" ]; then
+        log_err "  [ci] No PR found by title. Trying Linear branch: $linear_branch"
+        pr_json=$(gh pr list --head "$linear_branch" --state open --json number,headRefName,title --jq '.[0] // empty' 2>/dev/null) || true
+      fi
+    fi
+
+    if [ -z "$pr_json" ] || [ "$pr_json" = "null" ]; then
+      log_err "  [ci] No open PR found for $issue_id. Skipping."
+      continue
+    fi
+
+    local pr_number
+    pr_number=$(echo "$pr_json" | jq -r '.number')
+    local branch_name
+    branch_name=$(echo "$pr_json" | jq -r '.headRefName')
+    log_err "  [ci] Found PR #$pr_number (branch: $branch_name)"
+
+    # Fetch remote to ensure we have latest
+    log_err "  [ci] Fetching origin/$branch_name..."
+    if ! git fetch origin "$branch_name" 2>/dev/null; then
+      log_err "  [ci] Branch $branch_name not found on remote. Skipping."
+      continue
+    fi
+
+    # Check for CI failures
+    local verified_pr
+    verified_pr=$(check_pr_has_ci_failures "$work_dir" "$branch_name") || {
+      log_err "  [ci] No actionable CI failures for $issue_id. Skipping."
+      continue
+    }
+
+    log_err "[ci] >>> Found CI failures on PR #$pr_number for $issue_id! Processing..."
+
+    echo "$issue_json" | jq -c ". + {\"prNumber\": $pr_number, \"branchName\": \"$branch_name\"}"
+    return 0
+  done
+
+  log_err "[ci] No issues have actionable CI failures."
+  return 1
+}
+
+# Generate a CI-fix prd.json from failure logs
+start_ci_fix_task() {
+  local work_dir="$1"
+  local issue_json="$2"
+  local ralph_dir="$work_dir/scripts/ralph"
+
+  local issue_id issue_title issue_url branch_name
+  parse_issue_fields "$issue_json"
+  local pr_number
+  pr_number=$(printf '%s' "$issue_json" | jq -r '.prNumber')
+
+  log_err "[start-ci-fix] Generating CI-fix PRD for $issue_id (PR #$pr_number)..."
+  log_err "[start-ci-fix] Branch: $branch_name"
+
+  mkdir -p "$ralph_dir"
+
+  # Collect CI failure details
+  log_err "[start-ci-fix] Collecting CI failure details..."
+  local failure_details
+  failure_details=$(get_ci_failure_details "$work_dir" "$pr_number")
+  log_err "[start-ci-fix] CI failure details collected."
+
+  # Clean working tree and check out the branch
+  clean_working_tree "$work_dir"
+  log_err "[start-ci-fix] Checking out branch $branch_name..."
+  if ! git checkout "$branch_name" 2>/dev/null; then
+    log_err "[start-ci-fix] Branch $branch_name not found locally, creating from origin..."
+    git checkout -b "$branch_name" "origin/$branch_name" || {
+      log_err "[start-ci-fix] ERROR: Could not check out branch $branch_name"
+      return 1
+    }
+  fi
+  git pull origin "$branch_name" --ff-only 2>/dev/null || true
+  log_err "[start-ci-fix] On branch: $(git branch --show-current), latest commit: $(git log -1 --format='%h %s')"
+
+  # Record fix attempt in tracking file BEFORE generating PRD
+  local tracking_file="$SETTINGS_DIR/ci-fix-tracking.json"
+  local head_sha
+  head_sha=$(git rev-parse HEAD 2>/dev/null) || true
+  if [ -n "$head_sha" ]; then
+    mkdir -p "$SETTINGS_DIR"
+    if [ -f "$tracking_file" ]; then
+      local updated
+      updated=$(jq --arg b "$branch_name" --arg s "$head_sha" '.[$b] = $s' "$tracking_file" 2>/dev/null) || updated="{\"$branch_name\": \"$head_sha\"}"
+      echo "$updated" > "$tracking_file"
+    else
+      echo "{\"$branch_name\": \"$head_sha\"}" > "$tracking_file"
+    fi
+    log_err "[start-ci-fix] Recorded fix attempt: $branch_name -> $head_sha"
+  fi
+
+  log_err "[start-ci-fix] Invoking Claude to generate CI-fix prd.json..."
+
+  claude --dangerously-skip-permissions --print -p "$(read_prompt create-ci-fix-prd.md)
+
+Save to: $ralph_dir/prd.json
+branchName: $branch_name
+project: \"$issue_id: $issue_title (CI fix)\"
+
+## Linear Issue (for context only)
+- ID: $issue_id
+- Title: $issue_title
+- URL: $issue_url
+
+## CI Failure Details
+
+$failure_details
+
+$RALPH_SKILL_GUIDELINES" 2>&1 | tee /dev/stderr || true
+
+  verify_prd "$ralph_dir/prd.json" "start-ci-fix" || return 1
+  return 0
+}
+
 # --- Main Loop ---
 
 # Suppress notifications in child processes
@@ -996,14 +1304,59 @@ while true; do
     log "[loop] Review task PRD generated successfully."
   fi
 
-  # --- Priority 2: Check for new "Todo" issues ---
+  # --- Priority 2: Check for CI failures on existing PRs ---
   if [ -z "$TASK_TYPE" ]; then
-    log "[loop] No review tasks found. Priority 2: Checking for 'Todo' issues..."
+    log "[loop] Priority 2: Checking for CI failures on PRs..."
+    CI_JSON=""
+    set +e
+    CI_JSON=$(check_ci_tasks "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID")
+    CI_EXIT=$?
+    set -e
+    log "[loop] check_ci_tasks exited with status $CI_EXIT"
+
+    if [ -n "$CI_JSON" ]; then
+      TASK_TYPE="ci-fix"
+      ISSUE_JSON="$CI_JSON"
+      log "[loop] CI fix JSON received ($(printf '%s' "$ISSUE_JSON" | wc -c | tr -d ' ') bytes)"
+      set +e
+      parse_issue_fields "$ISSUE_JSON"
+      PARSE_EXIT=$?
+      set -e
+      if [ "$PARSE_EXIT" -ne 0 ]; then
+        log "[loop] ERROR: parse_issue_fields failed with status $PARSE_EXIT. Skipping..."
+        sleep "$POLL_INTERVAL"
+        continue
+      fi
+      ISSUE_ID="$issue_id"
+      BRANCH_NAME="$branch_name"
+      PR_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.prNumber')
+      log "[loop] Parsed CI fix task: issue=$ISSUE_ID branch=$BRANCH_NAME pr=#$PR_NUMBER"
+
+      log ""
+      log "============================================="
+      log "  Fixing CI failures: $ISSUE_ID (PR #$PR_NUMBER)"
+      log "  Branch: $BRANCH_NAME"
+      log "============================================="
+
+      cd "$WORK_DIR"
+      log "[loop] Starting CI fix task..."
+      start_ci_fix_task "$WORK_DIR" "$ISSUE_JSON" || {
+        log "[loop] Failed to generate CI fix PRD. Skipping..."
+        sleep "$POLL_INTERVAL"
+        continue
+      }
+      log "[loop] CI fix task PRD generated successfully."
+    fi
+  fi
+
+  # --- Priority 3: Check for new "Todo" issues ---
+  if [ -z "$TASK_TYPE" ]; then
+    log "[loop] No review or CI fix tasks found. Priority 3: Checking for 'Todo' issues..."
 
     ISSUE_JSON=$(start_task "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID") || true
 
     if [ -z "$ISSUE_JSON" ]; then
-      log "[loop] No tasks found (review or todo). Polling again in ${POLL_INTERVAL}s..."
+      log "[loop] No tasks found (review, ci-fix, or todo). Polling again in ${POLL_INTERVAL}s..."
       sleep "$POLL_INTERVAL"
       continue
     fi
@@ -1065,6 +1418,12 @@ $review_comments
 ## Recent commits addressing this feedback
 $(cd "$WORK_DIR" && git log --oneline -20)" 2>&1 | tee /dev/stderr || true
     log "[loop] Finished replying to PR comments."
+  elif [ "$TASK_TYPE" = "ci-fix" ]; then
+    # For CI fix tasks: push updates to the existing PR (no comment replies needed)
+    cd "$WORK_DIR"
+    log "[loop] Pushing CI fixes to origin..."
+    git push origin "$(git branch --show-current)" 2>/dev/null || true
+    log "[loop] Pushed CI fixes to PR #$PR_NUMBER."
   else
     # For new tasks: create PR based on exit status
     if [ "$RALPH_EXIT" -eq 0 ]; then
