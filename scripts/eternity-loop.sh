@@ -1383,6 +1383,10 @@ while true; do
   if [ -z "$TASK_TYPE" ]; then
     log "[loop] No review or CI fix tasks found. Priority 3: Checking for 'Todo' issues..."
 
+    # Clean and reset to main BEFORE generating prd.json, otherwise
+    # git clean -fd in ensure_main_branch will delete the untracked prd.json
+    ensure_main_branch "$WORK_DIR"
+
     ISSUE_JSON=$(start_task "$TEAM_ID" "$WORK_DIR" "$PROJECT_ID") || true
 
     if [ -z "$ISSUE_JSON" ]; then
@@ -1390,9 +1394,6 @@ while true; do
       sleep "$POLL_INTERVAL"
       continue
     fi
-
-    # Start from clean main branch for new tasks
-    ensure_main_branch "$WORK_DIR"
 
     TASK_TYPE="new"
     parse_issue_fields "$ISSUE_JSON"
