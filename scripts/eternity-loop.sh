@@ -20,11 +20,18 @@ PROJECT_NAME="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
 TMUX_SESSION="eternity-loop-${PROJECT_NAME}"
 WORKTREE_NAME="eternity-loop"
 
-# Load .env from multiple candidate paths (first match wins)
+# Load .env from standard candidate paths (first match wins)
 # Priority: .env.local > .env, checked in: cwd > script dir > repo root (when in worktree)
 load_env() {
-  local candidates=("$@")
-  for _env_candidate in "${candidates[@]}"; do
+  for _env_candidate in \
+    "$(pwd)/.env.local" \
+    "$(pwd)/.env" \
+    "$SCRIPT_DIR/.env.local" \
+    "$SCRIPT_DIR/.env" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/.env.local" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/.env" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env.local" \
+    "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env"; do
     [ -z "$_env_candidate" ] && continue
     if [ -f "$_env_candidate" ]; then
       set -a; source "$_env_candidate"; set +a
@@ -40,15 +47,7 @@ if [ -z "${ETERNITY_LOOP_INSIDE:-}" ]; then
   WORKTREE_PATH="$REPO_ROOT/.claude/worktrees/$WORKTREE_NAME"
 
   # Load .env in bootstrap phase so LINEAR_API_KEY can be passed to tmux
-  load_env \
-    "$(pwd)/.env.local" \
-    "$(pwd)/.env" \
-    "$SCRIPT_DIR/.env.local" \
-    "$SCRIPT_DIR/.env" \
-    "${ETERNITY_LOOP_REPO_ROOT:-}/.env.local" \
-    "${ETERNITY_LOOP_REPO_ROOT:-}/.env" \
-    "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env.local" \
-    "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env"
+  load_env
 
   # Determine the main branch name
   MAIN_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || true
@@ -107,16 +106,7 @@ log_err() {
 }
 
 # Load .env if present (for LINEAR_API_KEY)
-# Priority: .env.local > .env, checked in cwd > scripts dir > original repo (when in worktree)
-load_env \
-  "$(pwd)/.env.local" \
-  "$(pwd)/.env" \
-  "$SCRIPT_DIR/.env.local" \
-  "$SCRIPT_DIR/.env" \
-  "${ETERNITY_LOOP_REPO_ROOT:-}/.env.local" \
-  "${ETERNITY_LOOP_REPO_ROOT:-}/.env" \
-  "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env.local" \
-  "${ETERNITY_LOOP_REPO_ROOT:-}/scripts/.env"
+load_env
 
 if [ -z "${LINEAR_API_KEY:-}" ]; then
   log "ERROR: LINEAR_API_KEY is not set. Set it in your shell environment or in a .env file (project root or scripts directory)."
@@ -243,6 +233,9 @@ verify_prd() {
   log_err "[$label] PRD contents:"
   jq '.' "$prd_path" >&2 2>/dev/null || cat "$prd_path" >&2
 }
+
+# Load ralph SKILL.md guidelines for PRD generation prompts
+RALPH_SKILL_GUIDELINES=$(cat "$SCRIPT_DIR/../general/skills/ralph/SKILL.md" 2>/dev/null || echo "")
 
 save_settings() {
   local team_id="$1"
@@ -468,18 +461,22 @@ start_task() {
     log_err "[start-task] Status updated to 'In Progress'"
   fi
 
-  # 3. Generate prd.json via Claude + /ralph skill (only Claude call remaining)
+  # 3. Generate prd.json via Claude using ralph skill guidelines
   mkdir -p "$ralph_dir"
   cd "$work_dir"
-  claude --dangerously-skip-permissions --print -p "Use the /ralph skill to convert this Linear issue into prd.json format and save it to $ralph_dir/prd.json.
+  claude --dangerously-skip-permissions --print -p "$(cat "$SCRIPT_DIR/eternity-loop-prompts/create-prd.md")
 
-Issue ID: $issue_id
-Title: $issue_title
-Description: $issue_desc
-Branch name: $issue_branch
-URL: $issue_url
+Save to: $ralph_dir/prd.json
+branchName: $issue_branch
 
-Use the Linear branchName '$issue_branch' for the branchName field in prd.json." >&2 2>&1 || true
+## Linear Issue
+- ID: $issue_id
+- Title: $issue_title
+- Description: $issue_desc
+- Branch name: $issue_branch
+- URL: $issue_url
+
+$RALPH_SKILL_GUIDELINES" >&2 2>&1 || true
 
   verify_prd "$ralph_dir/prd.json" "start-task" || return 1
 
@@ -516,17 +513,11 @@ finalize_task() {
   git push -u origin "$branch" 2>/dev/null || git push origin "$branch"
   log_err "[finalize] Branch pushed. Invoking Claude to create PR..."
 
-  claude --dangerously-skip-permissions --print -p "Create a GitHub PR for the current branch using the gh CLI.
+  claude --dangerously-skip-permissions --print -p "$(cat "$SCRIPT_DIR/eternity-loop-prompts/create-pr.md")
 
 Title: $issue_id: $issue_title
 $( [ "$is_draft" = "true" ] && echo "Make it a DRAFT PR with: gh pr create --draft" || echo "Make it a regular PR with: gh pr create" )
-
-In the PR body include:
-- Resolves $issue_id
-- Link to Linear issue: $issue_url
-- A summary of what was implemented based on the commits on this branch (use git log main..HEAD)
-
-Use a HEREDOC for the body to ensure correct formatting." 2>&1 | tee /dev/stderr || true
+Linear issue: $issue_url" 2>&1 | tee /dev/stderr || true
 
   log_err "[finalize] PR created for $issue_id."
 }
@@ -806,30 +797,22 @@ start_review_task() {
   log_err "[start-review] On branch: $(git branch --show-current), latest commit: $(git log -1 --format='%h %s')"
   log_err "[start-review] Invoking Claude to generate review prd.json..."
 
-  claude --dangerously-skip-permissions --print -p "You need to create a prd.json to address PR review feedback.
+  claude --dangerously-skip-permissions --print -p "$(cat "$SCRIPT_DIR/eternity-loop-prompts/create-review-prd.md")
 
-## Original Linear Issue (for reference only)
+Save to: $ralph_dir/prd.json
+branchName: $branch_name
+project: \"$issue_id: $issue_title (review feedback)\"
+
+## Linear Issue (for context only)
 - ID: $issue_id
 - Title: $issue_title
 - URL: $issue_url
 
 ## PR #$pr_number Review Comments
-These are ALL non-resolved, non-outdated comments from the PR. Address all of them.
 
 $comments
 
-## Instructions
-Use the /ralph skill to create a prd.json at $ralph_dir/prd.json that addresses the review feedback above.
-
-Important:
-- The prd.json should create user stories for each piece of review feedback that needs code changes
-- Comments that are just questions or requests for explanation should NOT become user stories - they will be answered separately
-- If ALL comments are questions/explanations with no code changes needed, create a prd.json with an empty userStories array
-- Use the existing branch name: $branch_name
-- The project name should reference the original issue: \"$issue_id: $issue_title (review feedback)\"
-- Group related comments into single user stories where appropriate
-- Include the original comment text in the user story description for context
-- The original Linear issue is provided only for context - focus on the PR review comments" 2>&1 | tee /dev/stderr || true
+$RALPH_SKILL_GUIDELINES" 2>&1 | tee /dev/stderr || true
 
   verify_prd "$ralph_dir/prd.json" "start-review" || return 1
   return 0
@@ -938,91 +921,9 @@ while true; do
   # (branch management is handled by this script)
   ralph_dir="$WORK_DIR/scripts/ralph"
   mkdir -p "$ralph_dir"
-  cat > "$ralph_dir/CLAUDE.md" <<'RALPH_PROMPT'
-# Ralph Agent Instructions
-
-You are an autonomous coding agent working on a software project.
-
-## Your Task
-
-1. Read the PRD at `prd.json` (in the same directory as this file)
-2. Read the progress log at `progress.txt` (check Codebase Patterns section first)
-3. Stay on the current branch. Do NOT create, switch, or check out any branches.
-4. Pick the **highest priority** user story where `passes: false`
-5. Implement that single user story
-6. Run quality checks (e.g., typecheck, lint, test - use whatever your project requires)
-7. Update CLAUDE.md files if you discover reusable patterns (see below)
-8. If checks pass, commit ALL changes with message: `feat: [Story ID] - [Story Title]`
-9. Update the PRD to set `passes: true` for the completed story
-10. Append your progress to `progress.txt`
-
-## Progress Report Format
-
-APPEND to progress.txt (never replace, always append):
-```
-## [Date/Time] - [Story ID]
-- What was implemented
-- Files changed
-- **Learnings for future iterations:**
-  - Patterns discovered (e.g., "this codebase uses X for Y")
-  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
-  - Useful context (e.g., "the evaluation panel is in component X")
----
-```
-
-The learnings section is critical - it helps future iterations avoid repeating mistakes and understand the codebase better.
-
-## Consolidate Patterns
-
-If you discover a **reusable pattern** that future iterations should know, add it to the `## Codebase Patterns` section at the TOP of progress.txt (create it if it doesn't exist). This section should consolidate the most important learnings:
-
-```
-## Codebase Patterns
-- Example: Use `sql<number>` template for aggregations
-- Example: Always use `IF NOT EXISTS` for migrations
-- Example: Export types from actions.ts for UI components
-```
-
-Only add patterns that are **general and reusable**, not story-specific details.
-
-## Update CLAUDE.md Files
-
-Before committing, check if any edited files have learnings worth preserving in nearby CLAUDE.md files:
-
-1. **Identify directories with edited files** - Look at which directories you modified
-2. **Check for existing CLAUDE.md** - Look for CLAUDE.md in those directories or parent directories
-3. **Add valuable learnings** - If you discovered something future developers/agents should know
-
-**Do NOT add:**
-- Story-specific implementation details
-- Temporary debugging notes
-- Information already in progress.txt
-
-## Quality Requirements
-
-- ALL commits must pass your project's quality checks (typecheck, lint, test)
-- Do NOT commit broken code
-- Keep changes focused and minimal
-- Follow existing code patterns
-
-## Stop Condition
-
-After completing a user story, check if ALL stories have `passes: true`.
-
-If ALL stories are complete and passing, reply with:
-<promise>COMPLETE</promise>
-
-If there are still stories with `passes: false`, end your response normally (another iteration will pick up the next story).
-
-## Important
-
-- Work on ONE story per iteration
-- Commit frequently
-- Keep CI green
-- Do NOT switch branches - stay on the current branch at all times
-- Read the Codebase Patterns section in progress.txt before starting
-RALPH_PROMPT
-  log "[loop] Wrote scripts/ralph/CLAUDE.md (no branch management)"
+  # Copy ralph CLAUDE.md with branch override (step 3 changed from upstream)
+  cp "$SCRIPT_DIR/eternity-loop-prompts/ralph-claude-md.md" "$ralph_dir/CLAUDE.md"
+  log "[loop] Wrote scripts/ralph/CLAUDE.md (branch override)"
 
   # Run ralph-loop.sh from the project directory
   log ""
@@ -1045,26 +946,13 @@ RALPH_PROMPT
     log "[loop] Replying to PR comments on PR #$PR_NUMBER..."
     local review_comments
     review_comments=$(get_pr_review_comments "$WORK_DIR" "$PR_NUMBER")
-    claude --dangerously-skip-permissions --print -p "You need to reply to PR review comments on PR #$PR_NUMBER in this repo.
+    claude --dangerously-skip-permissions --print -p "$(sed "s/PR_NUMBER/$PR_NUMBER/g" "$SCRIPT_DIR/eternity-loop-prompts/reply-to-pr-comments.md")
 
-## PR Review Comments
+## PR #$PR_NUMBER Review Comments
 $review_comments
 
 ## Recent commits addressing this feedback
-$(cd "$WORK_DIR" && git log --oneline -20)
-
-## Instructions
-For each review comment above, post a reply on the PR using the gh CLI explaining how it was addressed.
-
-- For comments that requested code changes: explain what you changed and where, referencing the relevant commit(s)
-- For comments that asked questions: answer the question thoughtfully based on the codebase, WITHOUT making any code changes
-- For comments that are pure praise/approval: no reply needed
-- Use \`gh api\` to reply to inline review comments and issue comments:
-  - For inline review comments: \`gh api repos/{owner}/{repo}/pulls/$PR_NUMBER/comments -f body='...' -f in_reply_to=COMMENT_ID\`
-  - For top-level issue comments: \`gh api repos/{owner}/{repo}/issues/$PR_NUMBER/comments -f body='...'\`
-- Keep replies concise and helpful
-- Start every reply with \"🤖 **eternity-loop bot:**\" so it's clear this is an automated response
-- Do NOT make any code changes, only post comment replies" 2>&1 | tee /dev/stderr || true
+$(cd "$WORK_DIR" && git log --oneline -20)" 2>&1 | tee /dev/stderr || true
     log "[loop] Finished replying to PR comments."
   else
     # For new tasks: create PR based on exit status
