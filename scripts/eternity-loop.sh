@@ -770,15 +770,19 @@ get_ci_failure_details() {
 }
 
 # Fetch all non-resolved, non-outdated PR comments for review context
+# Optional 3rd arg: cutoff date (ISO 8601). When provided, comments are split into
+#   "new" (after cutoff — actionable) and "previous" (before cutoff — context only).
 get_pr_review_comments() {
   local work_dir="$1"
   local pr_number="$2"
+  local cutoff_date="${3:-}"
   local tmpdir
   tmpdir=$(mktemp -d)
 
   cd "$work_dir"
 
   log_err "  [comments] Fetching review comments for PR #$pr_number..."
+  [ -n "$cutoff_date" ] && log_err "  [comments] Cutoff date: $cutoff_date"
 
   # Get review comments via GraphQL - only unresolved, non-outdated threads
   local repo_nwo
@@ -865,17 +869,44 @@ get_pr_review_comments() {
   log_err "  [comments] Review bodies with text: $rv_count"
   log_err "  [comments] Total comments collected: $((rc_count + ic_count + rv_count))"
 
-  # Combine into a single JSON object
+  # Combine and split by cutoff date if provided
   python3 -c "
-import json
+import json, sys
+
 rc = json.load(open('$tmpdir/review_comments.json'))
 ic = json.load(open('$tmpdir/issue_comments.json'))
 rv = json.load(open('$tmpdir/reviews.json'))
-print(json.dumps({
-  'review_comments': rc,
-  'issue_comments': ic,
-  'reviews': rv
-}, indent=2))
+
+cutoff = '$cutoff_date'
+
+if cutoff:
+    def split_by_cutoff(items):
+        new = [c for c in items if (c.get('created_at') or '') > cutoff]
+        previous = [c for c in items if (c.get('created_at') or '') <= cutoff]
+        return new, previous
+
+    rc_new, rc_prev = split_by_cutoff(rc)
+    ic_new, ic_prev = split_by_cutoff(ic)
+    rv_new, rv_prev = split_by_cutoff(rv)
+
+    print(json.dumps({
+        'new_comments': {
+            'review_comments': rc_new,
+            'issue_comments': ic_new,
+            'reviews': rv_new
+        },
+        'previous_comments': {
+            'review_comments': rc_prev,
+            'issue_comments': ic_prev,
+            'reviews': rv_prev
+        }
+    }, indent=2))
+else:
+    print(json.dumps({
+        'review_comments': rc,
+        'issue_comments': ic,
+        'reviews': rv
+    }, indent=2))
 "
 
   rm -rf "$tmpdir"
@@ -1004,13 +1035,7 @@ start_review_task() {
 
   mkdir -p "$ralph_dir"
 
-  # Collect all non-outdated PR comments
-  log_err "[start-review] Collecting PR comments..."
-  local comments
-  comments=$(get_pr_review_comments "$work_dir" "$pr_number")
-  log_err "[start-review] PR comments collected."
-
-  # Clean working tree and check out the branch
+  # Clean working tree and check out the branch first (need commit date for cutoff)
   clean_working_tree "$work_dir"
   log_err "[start-review] Checking out branch $branch_name..."
   if ! git checkout "$branch_name" 2>/dev/null; then
@@ -1022,6 +1047,18 @@ start_review_task() {
   fi
   git pull origin "$branch_name" --ff-only 2>/dev/null || true
   log_err "[start-review] On branch: $(git branch --show-current), latest commit: $(git log -1 --format='%h %s')"
+
+  # Get the latest commit date as cutoff for splitting comments
+  local latest_commit_date
+  latest_commit_date=$(TZ=UTC git log -1 --format="%ad" --date=format-local:'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || true
+  log_err "[start-review] Latest commit date (cutoff): $latest_commit_date"
+
+  # Collect PR comments, split by cutoff date
+  log_err "[start-review] Collecting PR comments..."
+  local comments
+  comments=$(get_pr_review_comments "$work_dir" "$pr_number" "$latest_commit_date")
+  log_err "[start-review] PR comments collected."
+
   log_err "[start-review] Invoking Claude to generate review prd.json..."
 
   claude --dangerously-skip-permissions --print -p "$(read_prompt create-review-prd.md)
@@ -1035,9 +1072,16 @@ project: \"$issue_id: $issue_title (review feedback)\"
 - Title: $issue_title
 - URL: $issue_url
 
-## PR #$pr_number Review Comments
+## PR #$pr_number — NEW Review Comments (after latest commit $latest_commit_date)
+These are the comments that need to be addressed. Create user stories for these.
 
-$comments
+$(echo "$comments" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get('new_comments', d), indent=2))")
+
+## PR #$pr_number — Previous Comments (before latest commit, for context only)
+These comments were posted before the latest commit. They may have already been addressed.
+Do NOT create user stories for these — they are provided only as background context.
+
+$(echo "$comments" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get('previous_comments', {}), indent=2))")
 
 $RALPH_SKILL_GUIDELINES" 2>&1 | tee /dev/stderr || true
 
