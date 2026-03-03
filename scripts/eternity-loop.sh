@@ -805,25 +805,6 @@ get_ci_failure_details() {
       echo '```'
     fi
 
-    # Also try to get annotations (error/warning messages from the run)
-    local annotations
-    annotations=$(gh api "repos/{owner}/{repo}/check-runs" \
-      --jq "[.check_runs[] | select(.external_id == \"$run_id\" or .name != \"\") | .output.annotations // []] | flatten | .[] | select(.annotation_level == \"failure\" or .annotation_level == \"error\") | \"  \(.path):\(.start_line): \(.message)\"" 2>/dev/null) || true
-
-    if [ -z "$annotations" ]; then
-      # Try via check-suites for this commit
-      annotations=$(gh api "repos/{owner}/{repo}/commits/$head_sha/check-runs" \
-        --jq "[.check_runs[] | select(.conclusion == \"failure\") | {name: .name, annotations: (.output.annotations // [])}] | .[] | .annotations[] | select(.annotation_level == \"failure\" or .annotation_level == \"error\") | \"  \(.path):\(.start_line): \(.message)\"" 2>/dev/null) || true
-    fi
-
-    if [ -n "$annotations" ]; then
-      echo ""
-      echo "#### Error Annotations"
-      echo '```'
-      echo "$annotations"
-      echo '```'
-    fi
-
     echo ""
   done
 }
