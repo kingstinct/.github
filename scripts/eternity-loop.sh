@@ -1497,13 +1497,33 @@ while true; do
     log "[loop] On branch: $(git branch --show-current)"
   fi
 
-  # Write project-specific CLAUDE.md that tells Ralph NOT to manage branches
-  # (branch management is handled by this script)
+  # Write project-specific CLAUDE.md based on task type
   ralph_dir="$WORK_DIR/scripts/ralph"
   mkdir -p "$ralph_dir"
-  # Copy ralph CLAUDE.md with branch override (step 3 changed from upstream)
-  cp "$PROMPTS_DIR/ralph-claude-md.md" "$ralph_dir/CLAUDE.md"
-  log "[loop] Wrote scripts/ralph/CLAUDE.md (branch override)"
+
+  if [ "$TASK_TYPE" = "ci-fix" ]; then
+    # CI fix: include failure details in CLAUDE.md so Ralph has full context
+    log "[loop] Collecting CI failure details for Ralph context..."
+    CI_FAILURE_CONTEXT=$(get_ci_failure_details "$WORK_DIR" "$PR_NUMBER")
+    cat "$PROMPTS_DIR/ralph-claude-md.md" > "$ralph_dir/CLAUDE.md"
+    cat >> "$ralph_dir/CLAUDE.md" <<CIEOF
+
+## CI Fix Mode
+
+You are fixing CI failures on an existing PR. Use \`fix(ci):\` prefix for all commit messages instead of \`feat:\`.
+
+### CI Failure Details
+
+The following CI failures need to be fixed. Use this context alongside the user stories in prd.json to understand what went wrong.
+
+$CI_FAILURE_CONTEXT
+CIEOF
+    log "[loop] Wrote scripts/ralph/CLAUDE.md (CI fix mode with failure context)"
+  else
+    # Default: standard ralph CLAUDE.md
+    cp "$PROMPTS_DIR/ralph-claude-md.md" "$ralph_dir/CLAUDE.md"
+    log "[loop] Wrote scripts/ralph/CLAUDE.md (branch override)"
+  fi
 
   # Run ralph-loop.sh from the project directory
   log ""
