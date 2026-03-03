@@ -726,12 +726,12 @@ get_ci_failure_details() {
   local branch_name
   branch_name=$(gh pr view "$pr_number" --json headRefName --jq '.headRefName' 2>/dev/null) || true
 
-  # Get failed check names
-  local failed_checks
-  failed_checks=$(gh pr checks "$pr_number" --json name,state,bucket --jq '[.[] | select(.bucket == "fail" or .state == "FAILURE" or .state == "ERROR")] | .[].name' 2>/dev/null) || true
+  # Get failed check names with detail
+  local failed_checks_json
+  failed_checks_json=$(gh pr checks "$pr_number" --json name,state,bucket,detailsUrl 2>/dev/null) || true
 
   echo "## Failed Checks"
-  echo "$failed_checks"
+  echo "$failed_checks_json" | jq -r '[.[] | select(.bucket == "fail" or .state == "FAILURE" or .state == "ERROR")] | .[] | "- \(.name) (\(.state // .bucket))"' 2>/dev/null || echo "(could not parse checks)"
   echo ""
 
   # Find failed GitHub Actions runs on this branch for the HEAD commit
@@ -762,9 +762,68 @@ get_ci_failure_details() {
     local run_name
     run_name=$(gh run view "$run_id" --json name --jq '.name' 2>/dev/null) || run_name="Run $run_id"
     echo "### $run_name (run $run_id)"
-    echo '```'
-    gh run view "$run_id" --log-failed 2>/dev/null | tail -200
-    echo '```'
+    echo ""
+
+    # List failed jobs within this run for structure
+    local failed_jobs
+    failed_jobs=$(gh run view "$run_id" --json jobs --jq '[.jobs[] | select(.conclusion == "failure")] | .[] | "\(.name) (step: \([.steps[] | select(.conclusion == "failure")] | .[0].name // "unknown"))"' 2>/dev/null) || true
+    if [ -n "$failed_jobs" ]; then
+      echo "Failed jobs:"
+      echo "$failed_jobs" | while IFS= read -r job; do echo "- $job"; done
+      echo ""
+    fi
+
+    # Get failed step logs — capture full output, then intelligently truncate
+    local full_log
+    full_log=$(gh run view "$run_id" --log-failed 2>/dev/null) || true
+
+    if [ -n "$full_log" ]; then
+      local line_count
+      line_count=$(echo "$full_log" | wc -l | tr -d ' ')
+      log_err "  [ci-details] Run $run_id failed log: $line_count lines"
+
+      if [ "$line_count" -le 500 ]; then
+        # Short enough to include in full
+        echo '```'
+        echo "$full_log"
+        echo '```'
+      else
+        # For large logs: include first 100 lines (setup/context) and last 400 lines (errors)
+        echo '```'
+        echo "--- First 100 lines (setup context) ---"
+        echo "$full_log" | head -100
+        echo ""
+        echo "--- ... ($((line_count - 500)) lines omitted) ... ---"
+        echo ""
+        echo "--- Last 400 lines (failure details) ---"
+        echo "$full_log" | tail -400
+        echo '```'
+      fi
+    else
+      echo '```'
+      echo "(no log output available)"
+      echo '```'
+    fi
+
+    # Also try to get annotations (error/warning messages from the run)
+    local annotations
+    annotations=$(gh api "repos/{owner}/{repo}/check-runs" \
+      --jq "[.check_runs[] | select(.external_id == \"$run_id\" or .name != \"\") | .output.annotations // []] | flatten | .[] | select(.annotation_level == \"failure\" or .annotation_level == \"error\") | \"  \(.path):\(.start_line): \(.message)\"" 2>/dev/null) || true
+
+    if [ -z "$annotations" ]; then
+      # Try via check-suites for this commit
+      annotations=$(gh api "repos/{owner}/{repo}/commits/$head_sha/check-runs" \
+        --jq "[.check_runs[] | select(.conclusion == \"failure\") | {name: .name, annotations: (.output.annotations // [])}] | .[] | .annotations[] | select(.annotation_level == \"failure\" or .annotation_level == \"error\") | \"  \(.path):\(.start_line): \(.message)\"" 2>/dev/null) || true
+    fi
+
+    if [ -n "$annotations" ]; then
+      echo ""
+      echo "#### Error Annotations"
+      echo '```'
+      echo "$annotations"
+      echo '```'
+    fi
+
     echo ""
   done
 }
