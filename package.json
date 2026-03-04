@@ -1,0 +1,14 @@
+{
+  "name": "eternity-loop",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@linear/sdk": "^29.0.0",
+    "@octokit/rest": "^21.0.0",
+    "@octokit/graphql": "^8.0.0",
+    "@inquirer/prompts": "^7.0.0"
+  },
+  "devDependencies": {
+    "bun-types": "^1.2.0"
+  }
+}
