@@ -1,10 +1,10 @@
 import type { Workflow } from "./types";
 import type { IssueProvider } from "../providers/types";
 import type { Issue, WorkflowContext } from "../types";
-import { log } from "../logger";
+import { log, logDebug, logPrdEntryCount } from "../logger";
 import { checkoutBranch, pushBranch, getLatestCommitDate } from "../git";
 import { createGitHubClient, getRepoInfo } from "../github/client";
-import { findPrByBranch, getPrComments, postPrComment, checkForNewHumanComments } from "../github/pr";
+import { findPrByBranch, getPrComments, postPrComment, checkForNewHumanComments, countWorkflowRunsSinceLastHumanInteraction } from "../github/pr";
 import { readPrompt } from "../prompts";
 import { ClaudeCliRunner } from "../ai-runner";
 import { join } from "node:path";
@@ -14,7 +14,7 @@ export class ReviewWorkflow implements Workflow {
   priority = 1;
 
   async check(ctx: WorkflowContext, provider: IssueProvider): Promise<Issue | null> {
-    log("[review] Checking for issues needing review attention...");
+    logDebug("[review] Checking for issues needing review attention...");
 
     // Query for In Review issues with prd label
     const inReview = await provider.queryIssues({
@@ -36,6 +36,7 @@ export class ReviewWorkflow implements Workflow {
     const octokit = createGitHubClient();
     const { owner, repo } = await getRepoInfo(ctx.workDir);
 
+    let commentCount = 0;
     for (const issue of candidates) {
       const pr = await findPrByBranch(octokit, owner, repo, issue.branchName);
       if (!pr) continue;
@@ -46,10 +47,24 @@ export class ReviewWorkflow implements Workflow {
       );
 
       if (hasNewComments) {
+        // Check if we've already hit the attempt limit since last human interaction
+        const runs = await countWorkflowRunsSinceLastHumanInteraction(
+          octokit, owner, repo, pr.number, "Review changes applied.",
+        );
+        if (runs >= 3) {
+          logDebug(`[review] Skipping ${issue.identifier}: reached 3 review attempts since last human interaction`);
+          continue;
+        }
+
+        commentCount++;
         log(`[review] Found issue ${issue.identifier} with new PR comments`);
         issue.prNumber = pr.number;
         return issue;
       }
+    }
+
+    if (commentCount === 0) {
+      logDebug(`[review] Found 0 issues with new PR comments`);
     }
 
     return null;
@@ -90,6 +105,9 @@ export class ReviewWorkflow implements Workflow {
     ].join("\n");
 
     await runner.run(fullPrompt, ctx.workDir);
+
+    // Log PRD entry count
+    await logPrdEntryCount("review", join(ctx.ralphDir, "prd.json"));
 
     // Write CLAUDE.md from ralph-claude-md.md
     const claudeMdContent = await readPrompt("ralph-claude-md.md");

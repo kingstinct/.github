@@ -1,12 +1,33 @@
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
-import { log } from "./logger";
+import { log, logWorkflow, startSpinner } from "./logger";
+
+interface UserStory {
+  id: string;
+  title: string;
+  passes: boolean;
+}
+
+interface Prd {
+  userStories: UserStory[];
+}
+
+async function readPrd(prdFile: string): Promise<Prd | null> {
+  try {
+    const file = Bun.file(prdFile);
+    if (!(await file.exists())) return null;
+    return await file.json() as Prd;
+  } catch {
+    return null;
+  }
+}
 
 export async function runRalph(options: {
   projectDir: string;
   maxIterations: number;
+  workflowName?: string;
 }): Promise<number> {
-  const { projectDir, maxIterations } = options;
+  const { projectDir, maxIterations, workflowName } = options;
   const ralphDir = join(projectDir, "scripts/ralph");
   const prdFile = join(ralphDir, "prd.json");
   const progressFile = join(ralphDir, "progress.txt");
@@ -32,13 +53,28 @@ export async function runRalph(options: {
   // Start fresh progress.txt
   await Bun.write(progressFile, `# Ralph Progress Log\nStarted: ${new Date().toString()}\n---\n`);
 
-  log("[ralph] Starting Ralph - Max iterations:", maxIterations);
+  const logColored = workflowName
+    ? (...args: unknown[]) => logWorkflow(workflowName, ...args)
+    : (...args: unknown[]) => log(...args);
+
+  logColored("[ralph] Starting Ralph - Max iterations:", maxIterations);
 
   for (let i = 1; i <= maxIterations; i++) {
-    log(`[ralph] ===============================================================`);
-    log(`[ralph]   Iteration ${i} of ${maxIterations}`);
-    log(`[ralph] ===============================================================`);
+    logColored(`[ralph] ===============================================================`);
+    logColored(`[ralph]   Iteration ${i} of ${maxIterations}`);
+    logColored(`[ralph] ===============================================================`);
 
+    // Log current step before iteration
+    const prdBefore = await readPrd(prdFile);
+    if (prdBefore) {
+      const nextStory = prdBefore.userStories.find((s) => !s.passes);
+      if (nextStory) {
+        logColored(`[ralph] Starting: ${nextStory.id} - ${nextStory.title}`);
+      }
+    }
+
+    logColored(`[ralph] Running Claude, this could take a while...`);
+    const spinner = startSpinner(`Ralph iteration ${i}/${maxIterations} running...`);
     let output: string;
     try {
       output = await Bun.$`claude --dangerously-skip-permissions --print < ${claudeMdFile}`
@@ -52,22 +88,32 @@ export async function runRalph(options: {
     } catch (e: unknown) {
       const err = e as { stdout?: { toString(): string } };
       output = err.stdout?.toString() ?? "";
-      log(`[ralph] Iteration ${i} exited with error, continuing...`);
+      logColored(`[ralph] Iteration ${i} exited with error, continuing...`);
+    } finally {
+      spinner.stop();
+    }
+
+    // Log progress after iteration
+    const prdAfter = await readPrd(prdFile);
+    if (prdAfter) {
+      const passed = prdAfter.userStories.filter((s) => s.passes).length;
+      const total = prdAfter.userStories.length;
+      logColored(`[ralph] Progress: ${passed}/${total} user stories complete`);
     }
 
     // Check for completion signal
     if (output.includes("<promise>COMPLETE</promise>")) {
-      log(`[ralph] Ralph completed all tasks at iteration ${i} of ${maxIterations}!`);
+      logColored(`[ralph] Ralph completed all tasks at iteration ${i} of ${maxIterations}!`);
       await sendNotification(
         `Ralph completed all tasks! ✅ (iteration ${i}/${maxIterations} in ${projectDir})`,
       );
       return 0;
     }
 
-    log(`[ralph] Iteration ${i} complete. Continuing...`);
+    logColored(`[ralph] Iteration ${i} complete. Continuing...`);
   }
 
-  log(`[ralph] Ralph reached max iterations (${maxIterations}) without completing all tasks.`);
+  logColored(`[ralph] Ralph reached max iterations (${maxIterations}) without completing all tasks.`);
   await sendNotification(
     `Ralph reached max iterations (${maxIterations}) in ${projectDir} ⚠️`,
   );

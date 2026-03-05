@@ -19,6 +19,8 @@ export async function ensureMainBranch(workDir: string): Promise<void> {
 }
 
 export async function checkoutBranch(workDir: string, branch: string): Promise<void> {
+  await $`git -C ${workDir} fetch origin`.quiet();
+
   // Try checking out existing branch first, create from remote if available
   try {
     await $`git -C ${workDir} checkout ${branch}`.quiet();
@@ -28,6 +30,13 @@ export async function checkoutBranch(workDir: string, branch: string): Promise<v
     } catch {
       await $`git -C ${workDir} checkout -b ${branch}`;
     }
+  }
+
+  // Pull latest from origin if the remote branch exists
+  try {
+    await $`git -C ${workDir} reset --hard origin/${branch}`.quiet();
+  } catch {
+    // Remote branch may not exist yet for new branches
   }
 }
 

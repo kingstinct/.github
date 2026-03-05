@@ -3,7 +3,7 @@
 import { parseArgs } from "util";
 import { isInsideSession, bootstrap, cleanupWorktree } from "./bootstrap";
 import { loadSettings, saveSettings } from "./config";
-import { log, logErr } from "./logger";
+import { log, logErr, logDebug, logWorkflow } from "./logger";
 import { LinearProvider } from "./providers/linear";
 import { ReviewWorkflow } from "./workflows/review";
 import { CiFixWorkflow } from "./workflows/ci-fix";
@@ -52,7 +52,7 @@ const repoRoot = process.env.ETERNITY_LOOP_REPO_ROOT ?? workDir;
 async function ensureSettings(provider: LinearProvider): Promise<Settings> {
   let settings = await loadSettings(repoRoot);
   if (settings) {
-    log("[loop] Loaded existing settings");
+    logDebug("[loop] Loaded existing settings");
     return settings;
   }
 
@@ -132,20 +132,20 @@ async function main() {
     let workFound = false;
 
     for (const workflow of workflows) {
-      log(`[loop] Checking workflow: ${workflow.name} (priority ${workflow.priority})`);
+      logDebug(`[loop] Checking workflow: ${workflow.name} (priority ${workflow.priority})`);
 
       try {
         const issue = await workflow.check(ctx, provider);
         if (!issue) continue;
 
         workFound = true;
-        log(`[loop] Workflow "${workflow.name}" found work: ${issue.identifier} - ${issue.title}`);
+        logWorkflow(workflow.name, `[loop] Workflow "${workflow.name}" found work: ${issue.identifier} - ${issue.title}`);
 
         await workflow.prepare(ctx, issue);
-        const exitCode = await runRalph({ projectDir: workDir, maxIterations });
+        const exitCode = await runRalph({ projectDir: workDir, maxIterations, workflowName: workflow.name });
         await workflow.finalize(ctx, issue, exitCode);
 
-        log(`[loop] Workflow "${workflow.name}" completed for ${issue.identifier}`);
+        logWorkflow(workflow.name, `[loop] Workflow "${workflow.name}" completed for ${issue.identifier}`);
         break; // Restart workflow priority loop
       } catch (err) {
         logErr(`[loop] Error in workflow "${workflow.name}": ${err}`);

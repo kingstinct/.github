@@ -91,12 +91,13 @@ export interface PrComment {
   body: string;
   createdAt: string;
   type: "review_thread" | "issue_comment" | "review_body";
+  isBot: boolean;
 }
 
 const BOT_COMMENT_PREFIX = "🤖 **eternity-loop bot:**";
 const BOT_USERS = ["copilot", "github-actions[bot]"];
 
-function isBot(author: string, body: string): boolean {
+function checkIsBot(author: string, body: string): boolean {
   return BOT_USERS.includes(author) || body.startsWith(BOT_COMMENT_PREFIX);
 }
 
@@ -122,13 +123,16 @@ interface ReviewThreadsResponse {
   };
 }
 
-export async function getPrComments(
+/**
+ * Fetch all PR comments (human and bot) from review threads, issue comments,
+ * and review bodies. Each comment is tagged with `isBot`.
+ */
+export async function fetchAllPrComments(
   octokit: Octokit,
   owner: string,
   repo: string,
   prNumber: number,
-  cutoffDate?: string,
-): Promise<{ all: PrComment[]; new: PrComment[]; previous: PrComment[] }> {
+): Promise<PrComment[]> {
   const token = process.env.GITHUB_TOKEN;
   const gql = graphql.defaults({ headers: { authorization: `token ${token}` } });
 
@@ -164,13 +168,13 @@ export async function getPrComments(
     if (thread.isResolved || thread.isOutdated) continue;
     for (const comment of thread.comments.nodes) {
       const author = comment.author?.login ?? "unknown";
-      if (isBot(author, comment.body)) continue;
       comments.push({
         id: comment.databaseId,
         author,
         body: comment.body,
         createdAt: comment.createdAt,
         type: "review_thread",
+        isBot: checkIsBot(author, comment.body),
       });
     }
   }
@@ -185,13 +189,14 @@ export async function getPrComments(
 
   for (const comment of issueComments) {
     const author = comment.user?.login ?? "unknown";
-    if (isBot(author, comment.body ?? "")) continue;
+    const body = comment.body ?? "";
     comments.push({
       id: comment.id,
       author,
-      body: comment.body ?? "",
+      body,
       createdAt: comment.created_at,
       type: "issue_comment",
+      isBot: checkIsBot(author, body),
     });
   }
 
@@ -206,25 +211,37 @@ export async function getPrComments(
   for (const review of reviews) {
     if (!review.body) continue;
     const author = review.user?.login ?? "unknown";
-    if (isBot(author, review.body)) continue;
     comments.push({
       id: review.id,
       author,
       body: review.body,
       createdAt: review.submitted_at ?? "",
       type: "review_body",
+      isBot: checkIsBot(author, review.body),
     });
   }
 
-  // Split by cutoff date
+  return comments;
+}
+
+export async function getPrComments(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  cutoffDate?: string,
+): Promise<{ all: PrComment[]; new: PrComment[]; previous: PrComment[] }> {
+  const allComments = await fetchAllPrComments(octokit, owner, repo, prNumber);
+  const humanComments = allComments.filter((c) => !c.isBot);
+
   if (cutoffDate) {
     const cutoff = new Date(cutoffDate);
-    const newComments = comments.filter((c) => new Date(c.createdAt) > cutoff);
-    const previousComments = comments.filter((c) => new Date(c.createdAt) <= cutoff);
-    return { all: comments, new: newComments, previous: previousComments };
+    const newComments = humanComments.filter((c) => new Date(c.createdAt) > cutoff);
+    const previousComments = humanComments.filter((c) => new Date(c.createdAt) <= cutoff);
+    return { all: humanComments, new: newComments, previous: previousComments };
   }
 
-  return { all: comments, new: comments, previous: [] };
+  return { all: humanComments, new: humanComments, previous: [] };
 }
 
 export async function checkForNewHumanComments(
@@ -236,4 +253,37 @@ export async function checkForNewHumanComments(
 ): Promise<boolean> {
   const { new: newComments } = await getPrComments(octokit, owner, repo, prNumber, latestCommitDate);
   return newComments.length > 0;
+}
+
+/**
+ * Count how many times a specific workflow has run since the last human
+ * interaction on a PR. Counts bot comments matching the workflow marker.
+ * For PRs with no human interaction, counts from the beginning.
+ */
+export async function countWorkflowRunsSinceLastHumanInteraction(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  workflowMarker: string,
+): Promise<number> {
+  const allComments = await fetchAllPrComments(octokit, owner, repo, prNumber);
+
+  // Find latest human interaction date
+  const humanComments = allComments.filter((c) => !c.isBot);
+  let latestHumanDate: Date | null = null;
+  for (const c of humanComments) {
+    const d = new Date(c.createdAt);
+    if (!latestHumanDate || d > latestHumanDate) {
+      latestHumanDate = d;
+    }
+  }
+  const cutoff = latestHumanDate ?? new Date(0);
+
+  // Count bot comments matching the workflow marker since cutoff
+  return allComments.filter((c) =>
+    c.isBot &&
+    c.body.includes(workflowMarker) &&
+    new Date(c.createdAt) > cutoff
+  ).length;
 }

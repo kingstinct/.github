@@ -1,7 +1,7 @@
 import type { Workflow } from "./types";
 import type { IssueProvider } from "../providers/types";
 import type { Issue, WorkflowContext } from "../types";
-import { log } from "../logger";
+import { log, logDebug, logWorkflow, logPrdEntryCount } from "../logger";
 import { ensureMainBranch, checkoutBranch, pushBranch } from "../git";
 import { createGitHubClient, getRepoInfo } from "../github/client";
 import { createPr, postPrComment } from "../github/pr";
@@ -14,7 +14,7 @@ export class NewFeatureWorkflow implements Workflow {
   priority = 3;
 
   async check(ctx: WorkflowContext, provider: IssueProvider): Promise<Issue | null> {
-    log("[new-feature] Checking for Todo issues with prd label...");
+    logDebug("[new-feature] Checking for Todo issues with prd label...");
 
     const issues = await provider.queryIssues({
       teamId: ctx.settings.teamId,
@@ -23,9 +23,13 @@ export class NewFeatureWorkflow implements Workflow {
       labels: ["prd"],
     });
 
-    if (issues.length === 0) return null;
+    const count = issues.length;
+    if (count === 0) {
+      logDebug(`[new-feature] Found 0 Todo issues to implement`);
+      return null;
+    }
 
-    // Return first one (ordered by createdAt from Linear)
+    log(`[new-feature] Found ${count} Todo issues to implement`);
     log(`[new-feature] Found Todo issue: ${issues[0].identifier}`);
     return issues[0];
   }
@@ -51,6 +55,9 @@ export class NewFeatureWorkflow implements Workflow {
     ].join("\n");
 
     await runner.run(fullPrompt, ctx.workDir);
+
+    // Log PRD entry count
+    await logPrdEntryCount("new-feature", join(ctx.ralphDir, "prd.json"));
 
     // Create and checkout feature branch
     await checkoutBranch(ctx.workDir, issue.branchName);

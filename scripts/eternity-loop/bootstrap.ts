@@ -1,5 +1,6 @@
 import { $ } from "bun";
 import { dirname, join } from "node:path";
+import { startSpinner } from "./logger";
 
 export function isInsideSession(): boolean {
   return process.env.ETERNITY_LOOP_INSIDE === "1";
@@ -23,6 +24,8 @@ export async function bootstrap(args: string[]): Promise<void> {
   const tmuxSession = `eternity-loop-${projectName}`;
   const worktreePath = join(repoRoot, ".claude/worktrees/eternity-loop");
   const scriptPath = join(dirname(import.meta.path), "index.ts");
+
+  const spinner = startSpinner("Starting up...");
 
   // Kill existing tmux session if running
   try {
@@ -55,6 +58,8 @@ export async function bootstrap(args: string[]): Promise<void> {
   }
 
   await $`git worktree add ${worktreePath} --detach ${mainRef}`;
+
+  spinner.stop();
 
   // Build the command to run inside tmux
   const argsStr = args.join(" ");

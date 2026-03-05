@@ -1,5 +1,9 @@
 import type { Octokit } from "@octokit/rest";
 import { join } from "node:path";
+import { logDebug } from "../logger";
+import { countWorkflowRunsSinceLastHumanInteraction } from "./pr";
+
+const MAX_WORKFLOW_ATTEMPTS = 3;
 
 interface CiFixTracking {
   fixedShas: string[];
@@ -9,9 +13,21 @@ async function loadTracking(settingsDir: string): Promise<CiFixTracking> {
   const trackingPath = join(settingsDir, "ci-fix-tracking.json");
   const file = Bun.file(trackingPath);
   if (await file.exists()) {
-    return file.json();
+    const data = await file.json();
+    return { fixedShas: data.fixedShas ?? [] };
   }
   return { fixedShas: [] };
+}
+
+export async function saveTracking(settingsDir: string, tracking: CiFixTracking): Promise<void> {
+  const trackingPath = join(settingsDir, "ci-fix-tracking.json");
+  await Bun.write(trackingPath, JSON.stringify(tracking, null, 2));
+}
+
+export async function recordFixedSha(settingsDir: string, headSha: string): Promise<void> {
+  const tracking = await loadTracking(settingsDir);
+  tracking.fixedShas.push(headSha);
+  await saveTracking(settingsDir, tracking);
 }
 
 export async function checkPrHasCiFailures(
@@ -20,6 +36,7 @@ export async function checkPrHasCiFailures(
   repo: string,
   branch: string,
   settingsDir: string,
+  prNumber?: number,
 ): Promise<boolean> {
   // Layer 1: Skip if latest commit starts with 'fix(ci):'
   const commitResult = await Bun.$`git log -1 --format=%s origin/${branch}`.quiet().text();
@@ -35,7 +52,18 @@ export async function checkPrHasCiFailures(
     return false;
   }
 
-  // Layer 3: Skip if any checks are pending
+  // Layer 3: Check workflow attempt limit (max 3 since last human interaction)
+  if (prNumber) {
+    const runs = await countWorkflowRunsSinceLastHumanInteraction(
+      octokit, owner, repo, prNumber, "CI fix applied.",
+    );
+    if (runs >= MAX_WORKFLOW_ATTEMPTS) {
+      logDebug(`[ci-fix] Skipping ${branch}: reached ${MAX_WORKFLOW_ATTEMPTS} CI fix attempts since last human interaction`);
+      return false;
+    }
+  }
+
+  // Layer 4: Skip if any checks are pending
   const { data: combinedStatus } = await octokit.repos.getCombinedStatusForRef({
     owner,
     repo,

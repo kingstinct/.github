@@ -1,11 +1,11 @@
 import type { Workflow } from "./types";
 import type { IssueProvider } from "../providers/types";
 import type { Issue, WorkflowContext } from "../types";
-import { log } from "../logger";
+import { logDebug, logWorkflow, logPrdEntryCount } from "../logger";
 import { checkoutBranch, pushBranch, getHeadSha } from "../git";
 import { createGitHubClient, getRepoInfo } from "../github/client";
 import { findPrByBranch, postPrComment } from "../github/pr";
-import { checkPrHasCiFailures, getCiFailureDetails } from "../github/ci";
+import { checkPrHasCiFailures, getCiFailureDetails, recordFixedSha } from "../github/ci";
 import { readPrompt } from "../prompts";
 import { ClaudeCliRunner } from "../ai-runner";
 import { join } from "node:path";
@@ -16,7 +16,7 @@ export class CiFixWorkflow implements Workflow {
   priority = 2;
 
   async check(ctx: WorkflowContext, provider: IssueProvider): Promise<Issue | null> {
-    log("[ci-fix] Checking for CI failures...");
+    logDebug("[ci-fix] Checking for CI failures...");
 
     const inReview = await provider.queryIssues({
       teamId: ctx.settings.teamId,
@@ -38,26 +38,32 @@ export class CiFixWorkflow implements Workflow {
 
     const settingsDir = join(ctx.workDir, ".eternity-loop");
 
+    let failureCount = 0;
     for (const issue of candidates) {
       const pr = await findPrByBranch(octokit, owner, repo, issue.branchName);
       if (!pr) continue;
 
       const hasCiFailures = await checkPrHasCiFailures(
-        octokit, owner, repo, issue.branchName, settingsDir,
+        octokit, owner, repo, issue.branchName, settingsDir, pr.number,
       );
 
       if (hasCiFailures) {
-        log(`[ci-fix] Found CI failures for ${issue.identifier} (PR #${pr.number})`);
+        failureCount++;
+        logWorkflow("ci-fix", `[ci-fix] Found CI failures for ${issue.identifier} (PR #${pr.number})`);
         issue.prNumber = pr.number;
         return issue;
       }
+    }
+
+    if (failureCount === 0) {
+      logDebug(`[ci-fix] Found 0 CI failures`);
     }
 
     return null;
   }
 
   async prepare(ctx: WorkflowContext, issue: Issue): Promise<void> {
-    log(`[ci-fix] Preparing CI fix workflow for ${issue.identifier}`);
+    logWorkflow("ci-fix", `[ci-fix] Preparing CI fix workflow for ${issue.identifier}`);
 
     const octokit = createGitHubClient();
     const { owner, repo } = await getRepoInfo(ctx.workDir);
@@ -70,18 +76,12 @@ export class CiFixWorkflow implements Workflow {
     // Check out the issue branch
     await checkoutBranch(ctx.workDir, issue.branchName);
 
-    // Record fix attempt in tracking file
+    // Record SHA to prevent re-processing same commit
     const settingsDir = join(ctx.workDir, ".eternity-loop");
     await mkdir(settingsDir, { recursive: true });
-    const trackingPath = join(settingsDir, "ci-fix-tracking.json");
-    const trackingFile = Bun.file(trackingPath);
-    const tracking = (await trackingFile.exists())
-      ? await trackingFile.json() as { fixedShas: string[] }
-      : { fixedShas: [] };
 
     const headSha = await getHeadSha(ctx.workDir, `origin/${issue.branchName}`);
-    tracking.fixedShas.push(headSha);
-    await Bun.write(trackingPath, JSON.stringify(tracking, null, 2));
+    await recordFixedSha(settingsDir, headSha);
 
     // Invoke AI runner with create-ci-fix-prd prompt
     const prompt = await readPrompt("create-ci-fix-prd.md");
@@ -95,6 +95,9 @@ export class CiFixWorkflow implements Workflow {
 
     await runner.run(fullPrompt, ctx.workDir);
 
+    // Log PRD entry count
+    await logPrdEntryCount("ci-fix", join(ctx.ralphDir, "prd.json"));
+
     // Write CLAUDE.md: standard ralph-claude-md.md + CI failure context appended
     const claudeMdContent = await readPrompt("ralph-claude-md.md");
     const ciClaudeMd = [
@@ -104,11 +107,11 @@ export class CiFixWorkflow implements Workflow {
     ].join("");
     await Bun.write(join(ctx.ralphDir, "CLAUDE.md"), ciClaudeMd);
 
-    log(`[ci-fix] Prepared CI fix PRD for ${issue.identifier}`);
+    logWorkflow("ci-fix", `[ci-fix] Prepared CI fix PRD for ${issue.identifier}`);
   }
 
   async finalize(ctx: WorkflowContext, issue: Issue, ralphExitCode: number): Promise<void> {
-    log(`[ci-fix] Finalizing CI fix for ${issue.identifier} (exit: ${ralphExitCode})`);
+    logWorkflow("ci-fix", `[ci-fix] Finalizing CI fix for ${issue.identifier} (exit: ${ralphExitCode})`);
 
     const octokit = createGitHubClient();
     const { owner, repo } = await getRepoInfo(ctx.workDir);
@@ -124,6 +127,6 @@ export class CiFixWorkflow implements Workflow {
       `🤖 **eternity-loop bot:** CI fix applied.\n\n<details><summary>Progress log</summary>\n\n${progress}\n\n</details>`,
     );
 
-    log(`[ci-fix] Finalized CI fix for ${issue.identifier}`);
+    logWorkflow("ci-fix", `[ci-fix] Finalized CI fix for ${issue.identifier}`);
   }
 }
