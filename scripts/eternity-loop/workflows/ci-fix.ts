@@ -127,6 +127,6 @@ export class CiFixWorkflow implements Workflow {
       `🤖 **eternity-loop bot:** CI fix applied.\n\n<details><summary>Progress log</summary>\n\n${progress}\n\n</details>`,
     );
 
-    logWorkflow("ci-fix", `[ci-fix] Finalized CI fix for ${issue.identifier}`);
+    logWorkflow("ci-fix", `[ci-fix] Finalized CI fix for ${issue.identifier} — https://github.com/${owner}/${repo}/pull/${issue.prNumber}`);
   }
 }

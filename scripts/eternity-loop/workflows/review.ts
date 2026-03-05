@@ -1,7 +1,7 @@
 import type { Workflow } from "./types";
 import type { IssueProvider } from "../providers/types";
 import type { Issue, WorkflowContext } from "../types";
-import { log, logDebug, logPrdEntryCount } from "../logger";
+import { logDebug, logWorkflow, logPrdEntryCount } from "../logger";
 import { checkoutBranch, pushBranch, getLatestCommitDate } from "../git";
 import { createGitHubClient, getRepoInfo } from "../github/client";
 import { findPrByBranch, getPrComments, postPrComment, checkForNewHumanComments, countWorkflowRunsSinceLastHumanInteraction } from "../github/pr";
@@ -57,7 +57,7 @@ export class ReviewWorkflow implements Workflow {
         }
 
         commentCount++;
-        log(`[review] Found issue ${issue.identifier} with new PR comments`);
+        logWorkflow("review", `[review] Found issue ${issue.identifier} with new PR comments`);
         issue.prNumber = pr.number;
         return issue;
       }
@@ -71,7 +71,7 @@ export class ReviewWorkflow implements Workflow {
   }
 
   async prepare(ctx: WorkflowContext, issue: Issue): Promise<void> {
-    log(`[review] Preparing review workflow for ${issue.identifier}`);
+    logWorkflow("review", `[review] Preparing review workflow for ${issue.identifier}`);
 
     const octokit = createGitHubClient();
     const { owner, repo } = await getRepoInfo(ctx.workDir);
@@ -113,11 +113,11 @@ export class ReviewWorkflow implements Workflow {
     const claudeMdContent = await readPrompt("ralph-claude-md.md");
     await Bun.write(join(ctx.ralphDir, "CLAUDE.md"), claudeMdContent);
 
-    log(`[review] Prepared review PRD for ${issue.identifier}`);
+    logWorkflow("review", `[review] Prepared review PRD for ${issue.identifier}`);
   }
 
   async finalize(ctx: WorkflowContext, issue: Issue, ralphExitCode: number): Promise<void> {
-    log(`[review] Finalizing review workflow for ${issue.identifier} (exit: ${ralphExitCode})`);
+    logWorkflow("review", `[review] Finalizing review workflow for ${issue.identifier} (exit: ${ralphExitCode})`);
 
     const octokit = createGitHubClient();
     const { owner, repo } = await getRepoInfo(ctx.workDir);
@@ -143,6 +143,6 @@ export class ReviewWorkflow implements Workflow {
       `🤖 **eternity-loop bot:** Review changes applied.\n\n<details><summary>Progress log</summary>\n\n${progress}\n\n</details>`,
     );
 
-    log(`[review] Finalized review for ${issue.identifier}`);
+    logWorkflow("review", `[review] Finalized review for ${issue.identifier} — https://github.com/${owner}/${repo}/pull/${issue.prNumber}`);
   }
 }

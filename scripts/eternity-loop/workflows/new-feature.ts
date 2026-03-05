@@ -1,10 +1,10 @@
 import type { Workflow } from "./types";
 import type { IssueProvider } from "../providers/types";
 import type { Issue, WorkflowContext } from "../types";
-import { log, logDebug, logWorkflow, logPrdEntryCount } from "../logger";
+import { logDebug, logWorkflow, logPrdEntryCount } from "../logger";
 import { ensureMainBranch, checkoutBranch, pushBranch } from "../git";
 import { createGitHubClient, getRepoInfo } from "../github/client";
-import { createPr, postPrComment } from "../github/pr";
+import { createPr, postPrComment, findPrByBranch } from "../github/pr";
 import { readPrompt } from "../prompts";
 import { ClaudeCliRunner } from "../ai-runner";
 import { join } from "node:path";
@@ -29,13 +29,13 @@ export class NewFeatureWorkflow implements Workflow {
       return null;
     }
 
-    log(`[new-feature] Found ${count} Todo issues to implement`);
-    log(`[new-feature] Found Todo issue: ${issues[0].identifier}`);
+    logWorkflow("new-feature", `[new-feature] Found ${count} Todo issues to implement`);
+    logWorkflow("new-feature", `[new-feature] Found Todo issue: ${issues[0].identifier}`);
     return issues[0];
   }
 
   async prepare(ctx: WorkflowContext, issue: Issue): Promise<void> {
-    log(`[new-feature] Preparing new feature workflow for ${issue.identifier}`);
+    logWorkflow("new-feature", `[new-feature] Preparing new feature workflow for ${issue.identifier}`);
 
     // Reset to main branch
     await ensureMainBranch(ctx.workDir);
@@ -66,11 +66,11 @@ export class NewFeatureWorkflow implements Workflow {
     const claudeMdContent = await readPrompt("ralph-claude-md.md");
     await Bun.write(join(ctx.ralphDir, "CLAUDE.md"), claudeMdContent);
 
-    log(`[new-feature] Prepared feature PRD for ${issue.identifier}`);
+    logWorkflow("new-feature", `[new-feature] Prepared feature PRD for ${issue.identifier}`);
   }
 
   async finalize(ctx: WorkflowContext, issue: Issue, ralphExitCode: number): Promise<void> {
-    log(`[new-feature] Finalizing new feature for ${issue.identifier} (exit: ${ralphExitCode})`);
+    logWorkflow("new-feature", `[new-feature] Finalizing new feature for ${issue.identifier} (exit: ${ralphExitCode})`);
 
     const octokit = createGitHubClient();
     const { owner, repo } = await getRepoInfo(ctx.workDir);
@@ -95,7 +95,7 @@ export class NewFeatureWorkflow implements Workflow {
         `🤖 **eternity-loop bot:** Feature implementation complete.\n\n<details><summary>Progress log</summary>\n\n${progress}\n\n</details>`,
       );
 
-      log(`[new-feature] Created PR ${pr.url}`);
+      logWorkflow("new-feature", `[new-feature] Created PR ${pr.url}`);
     } else {
       // Create draft PR via AI runner
       const runner = new ClaudeCliRunner();
@@ -108,7 +108,9 @@ export class NewFeatureWorkflow implements Workflow {
 
       await runner.run(fullPrompt, ctx.workDir);
 
-      log(`[new-feature] Created draft PR for ${issue.identifier}`);
+      const draftPr = await findPrByBranch(octokit, owner, repo, issue.branchName);
+      const draftUrl = draftPr ? draftPr.url : `https://github.com/${owner}/${repo}`;
+      logWorkflow("new-feature", `[new-feature] Created draft PR for ${issue.identifier} — ${draftUrl}`);
     }
   }
 }
