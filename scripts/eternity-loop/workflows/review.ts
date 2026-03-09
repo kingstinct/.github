@@ -4,7 +4,7 @@ import type { Issue, WorkflowContext } from "../types";
 import { logDebug, logWorkflow, logPrdEntryCount } from "../logger";
 import { checkoutBranch, pushBranch, getLatestCommitDate } from "../git";
 import { createGitHubClient, getRepoInfo } from "../github/client";
-import { findPrByBranch, getPrComments, postPrComment, checkForNewHumanComments, countWorkflowRunsSinceLastHumanInteraction } from "../github/pr";
+import { findPrByBranch, getPrComments, postPrComment, checkForNewHumanComments, countWorkflowRunsSinceLastHumanInteraction, uploadProgressScreenshots } from "../github/pr";
 import { readPrompt } from "../prompts";
 import { ClaudeCliRunner } from "../ai-runner";
 import { join } from "node:path";
@@ -142,6 +142,9 @@ export class ReviewWorkflow implements Workflow {
       octokit, owner, repo, issue.prNumber!,
       `🤖 **eternity-loop bot:** Review changes applied.\n\n<details><summary>Progress log</summary>\n\n${progress}\n\n</details>`,
     );
+
+    // Upload screenshots referenced in progress.txt
+    await uploadProgressScreenshots(octokit, owner, repo, issue.prNumber!, progress, ctx.workDir, issue.branchName);
 
     logWorkflow("review", `[review] Finalized review for ${issue.identifier} — https://github.com/${owner}/${repo}/pull/${issue.prNumber}`);
   }

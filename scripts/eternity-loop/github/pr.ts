@@ -1,5 +1,6 @@
 import type { Octokit } from "@octokit/rest";
 import { graphql } from "@octokit/graphql";
+import { join, basename } from "node:path";
 
 export async function findPrByBranch(
   octokit: Octokit,
@@ -286,4 +287,102 @@ export async function countWorkflowRunsSinceLastHumanInteraction(
     c.body.includes(workflowMarker) &&
     new Date(c.createdAt) > cutoff
   ).length;
+}
+
+/**
+ * Extract screenshot file paths referenced in progress.txt content.
+ * Looks for image file paths (relative or absolute) in the text.
+ */
+export function extractScreenshotPaths(progressContent: string, workDir: string): string[] {
+  const paths: string[] = [];
+
+  // Match file paths ending in image extensions
+  // Handles: ./path/to/file.png, path/to/file.png, /absolute/path/file.png
+  // Also handles paths in markdown image syntax: ![alt](path.png)
+  const pathPattern = /(?:!\[[^\]]*\]\()?([^\s\n\r"'()]+\.(?:png|jpg|jpeg|gif|webp|svg))(?:\))?/gi;
+
+  for (const match of progressContent.matchAll(pathPattern)) {
+    const filePath = match[1];
+    if (!filePath) continue;
+
+    // Resolve relative paths against workDir
+    const resolved = filePath.startsWith("/") ? filePath : join(workDir, filePath);
+    if (!paths.includes(resolved)) {
+      paths.push(resolved);
+    }
+  }
+
+  return paths;
+}
+
+/**
+ * Get the relative path of a file within a git repo.
+ */
+async function getRelativePath(workDir: string, absolutePath: string): Promise<string> {
+  // If path is already relative (starts within workDir), extract relative portion
+  if (absolutePath.startsWith(workDir)) {
+    return absolutePath.slice(workDir.length).replace(/^\//, "");
+  }
+  // Otherwise try git to resolve
+  try {
+    const result = await Bun.$`git -C ${workDir} ls-files --full-name ${absolutePath}`.text();
+    return result.trim();
+  } catch {
+    return basename(absolutePath);
+  }
+}
+
+/**
+ * Upload screenshots referenced in progress.txt to the PR as a comment.
+ * Screenshots that are committed to the branch are referenced via raw GitHub URLs.
+ * Screenshots not yet tracked are committed first, then referenced.
+ */
+export async function uploadProgressScreenshots(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  progressContent: string,
+  workDir: string,
+  branch: string,
+): Promise<void> {
+  const screenshotPaths = extractScreenshotPaths(progressContent, workDir);
+  if (screenshotPaths.length === 0) return;
+
+  const imageEntries: Array<{ name: string; url: string }> = [];
+
+  for (const filePath of screenshotPaths) {
+    const file = Bun.file(filePath);
+    if (!(await file.exists())) continue;
+
+    const relativePath = await getRelativePath(workDir, filePath);
+    const name = basename(filePath);
+
+    // Check if file is tracked in git
+    try {
+      await Bun.$`git -C ${workDir} ls-files --error-unmatch ${filePath}`.quiet();
+    } catch {
+      // File not tracked - add and commit it
+      try {
+        await Bun.$`git -C ${workDir} add ${filePath}`.quiet();
+        await Bun.$`git -C ${workDir} commit -m ${"chore: add screenshot " + name}`.quiet();
+      } catch {
+        continue; // Skip if we can't commit
+      }
+    }
+
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${relativePath}`;
+    imageEntries.push({ name, url: rawUrl });
+  }
+
+  if (imageEntries.length === 0) return;
+
+  const body = [
+    `🤖 **eternity-loop bot:** Screenshots from this run:\n`,
+    ...imageEntries.map((entry, i) =>
+      `### Screenshot ${i + 1}\n![${entry.name}](${entry.url})\n`
+    ),
+  ].join("\n");
+
+  await postPrComment(octokit, owner, repo, prNumber, body);
 }

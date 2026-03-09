@@ -13,7 +13,7 @@ You are an autonomous coding agent working on a software project.
 7. Update CLAUDE.md files if you discover reusable patterns (see below)
 8. If checks pass, commit ALL changes with message: `feat: [Story ID] - [Story Title]`
 9. Update the PRD to set `passes: true` for the completed story
-10. Append your progress to `progress.txt`
+10. Append your progress to `progress.txt`. When doing UI-related things and testing in browser or simulator tasks take screenshots of the results (one or max two per modified screen) and reference them in progress.txt
 
 ## Progress Report Format
 
@@ -22,6 +22,7 @@ APPEND to progress.txt (never replace, always append):
 ## [Date/Time] - [Story ID]
 - What was implemented
 - Files changed
+- References to screenshots taken (e.g. "See screenshot: progress-screenshots/story-id.png") with a brief description of what the screenshot shows
 - **Learnings for future iterations:**
   - Patterns discovered (e.g., "this codebase uses X for Y")
   - Gotchas encountered (e.g., "don't forget to update Z when changing W")

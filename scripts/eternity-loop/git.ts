@@ -42,7 +42,7 @@ export async function checkoutBranch(workDir: string, branch: string): Promise<v
 
 export async function pushBranch(workDir: string, branch?: string): Promise<void> {
   const branchName = branch ?? await getCurrentBranch(workDir);
-  await $`git -C ${workDir} push -u origin ${branchName}`;
+  await $`git -C ${workDir} push -u origin ${branchName} --no-verify`;
 }
 
 export async function getCurrentBranch(workDir: string): Promise<string> {

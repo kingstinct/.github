@@ -4,7 +4,7 @@ import type { Issue, WorkflowContext } from "../types";
 import { logDebug, logWorkflow, logPrdEntryCount } from "../logger";
 import { checkoutBranch, pushBranch, getHeadSha } from "../git";
 import { createGitHubClient, getRepoInfo } from "../github/client";
-import { findPrByBranch, postPrComment } from "../github/pr";
+import { findPrByBranch, postPrComment, uploadProgressScreenshots } from "../github/pr";
 import { checkPrHasCiFailures, getCiFailureDetails, recordFixedSha } from "../github/ci";
 import { readPrompt } from "../prompts";
 import { ClaudeCliRunner } from "../ai-runner";
@@ -126,6 +126,9 @@ export class CiFixWorkflow implements Workflow {
       octokit, owner, repo, issue.prNumber!,
       `🤖 **eternity-loop bot:** CI fix applied.\n\n<details><summary>Progress log</summary>\n\n${progress}\n\n</details>`,
     );
+
+    // Upload screenshots referenced in progress.txt
+    await uploadProgressScreenshots(octokit, owner, repo, issue.prNumber!, progress, ctx.workDir, issue.branchName);
 
     logWorkflow("ci-fix", `[ci-fix] Finalized CI fix for ${issue.identifier} — https://github.com/${owner}/${repo}/pull/${issue.prNumber}`);
   }

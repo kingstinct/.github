@@ -1,9 +1,0 @@
-{
-  "name": "planning",
-  "description": "Concise MVP-style planning with issue context gathering and clear test strategies",
-  "version": "1.0.2",
-  "author": {
-    "name": "Kingstinct",
-    "email": "robert@kingstinct.com"
-  }
-}

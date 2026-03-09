@@ -4,7 +4,7 @@ import type { Issue, WorkflowContext } from "../types";
 import { logDebug, logWorkflow, logPrdEntryCount } from "../logger";
 import { ensureMainBranch, checkoutBranch, pushBranch } from "../git";
 import { createGitHubClient, getRepoInfo } from "../github/client";
-import { createPr, postPrComment, findPrByBranch } from "../github/pr";
+import { createPr, postPrComment, findPrByBranch, uploadProgressScreenshots } from "../github/pr";
 import { readPrompt } from "../prompts";
 import { ClaudeCliRunner } from "../ai-runner";
 import { join } from "node:path";
@@ -95,6 +95,9 @@ export class NewFeatureWorkflow implements Workflow {
         `🤖 **eternity-loop bot:** Feature implementation complete.\n\n<details><summary>Progress log</summary>\n\n${progress}\n\n</details>`,
       );
 
+      // Upload screenshots referenced in progress.txt
+      await uploadProgressScreenshots(octokit, owner, repo, pr.number, progress, ctx.workDir, issue.branchName);
+
       logWorkflow("new-feature", `[new-feature] Created PR ${pr.url}`);
     } else {
       // Create draft PR via AI runner
@@ -109,6 +112,10 @@ export class NewFeatureWorkflow implements Workflow {
       await runner.run(fullPrompt, ctx.workDir);
 
       const draftPr = await findPrByBranch(octokit, owner, repo, issue.branchName);
+      if (draftPr) {
+        const draftProgress = await Bun.file(join(ctx.ralphDir, "progress.txt")).text();
+        await uploadProgressScreenshots(octokit, owner, repo, draftPr.number, draftProgress, ctx.workDir, issue.branchName);
+      }
       const draftUrl = draftPr ? draftPr.url : `https://github.com/${owner}/${repo}`;
       logWorkflow("new-feature", `[new-feature] Created draft PR for ${issue.identifier} — ${draftUrl}`);
     }
