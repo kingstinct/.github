@@ -42,7 +42,9 @@ jobs:
 
       - name: Validate individual plugins
         run: |
-          for plugin in biome bun general kysely-sql react typescript; do
+          plugins=$(bun -e 'const marketplace = await Bun.file(".claude-plugin/marketplace.json").json(); console.log(marketplace.plugins.filter((p) => typeof p.source === "string" && p.source.startsWith("./")).map((p) => p.source.slice(2)).join(" "));')
+
+          for plugin in $plugins; do
             echo "=== Validating $plugin ==="
             claude plugin validate "$plugin"
           done
