@@ -17,7 +17,6 @@ This repo hosts a Claude Code skills marketplace with curated plugins for Expo, 
 /plugin install callstack-skills@kingstinct-skills
 /plugin install anthropic-skills@kingstinct-skills
 /plugin install kysely-sql@kingstinct-skills
-/plugin install planning@kingstinct-skills
 /plugin install typescript@kingstinct-skills
 /plugin install biome@kingstinct-skills
 /plugin install general@kingstinct-skills
@@ -39,7 +38,6 @@ This repo hosts a Claude Code skills marketplace with curated plugins for Expo, 
 | Plugin | Description | Hooks |
 |--------|-------------|-------|
 | `kysely-sql` | SQL with Kysely (expo-sqlite / bun:sqlite) | - |
-| `planning` | MVP-style planning with issue context and test strategies | - |
 | `typescript` | Strict TypeScript best practices | `bun run typecheck` on Edit/Write |
 | `biome` | Auto-format and lint with Biome | `biome check --fix` on Edit/Write |
 | `bun` | Bun setup: install version from .bun-version/package.json/.env.github, run codegen | SessionStart |

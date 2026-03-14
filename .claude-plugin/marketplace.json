@@ -67,18 +67,6 @@
       "license": "MIT"
     },
     {
-      "name": "planning",
-      "source": "./planning",
-      "description": "Concise MVP-style planning with issue context gathering and integration/E2E test strategies.",
-      "author": {
-        "name": "Kingstinct",
-        "email": "robert@kingstinct.com"
-      },
-      "category": "workflow",
-      "tags": ["planning", "mvp", "testing", "e2e", "integration"],
-      "license": "MIT"
-    },
-    {
       "name": "typescript",
       "source": "./typescript",
       "description": "TypeScript best practices with typecheck hook on file changes.",
