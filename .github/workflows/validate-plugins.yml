@@ -42,7 +42,7 @@ jobs:
 
       - name: Validate individual plugins
         run: |
-          for plugin in biome bun general kysely-sql planning react typescript; do
+          for plugin in biome bun general kysely-sql react typescript; do
             echo "=== Validating $plugin ==="
             claude plugin validate "$plugin"
           done
