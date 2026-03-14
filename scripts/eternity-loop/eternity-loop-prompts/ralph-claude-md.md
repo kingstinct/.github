@@ -81,3 +81,4 @@ If there are still stories with `passes: false`, end your response normally (ano
 - Keep CI green
 - Do NOT switch branches - stay on the current branch at all times
 - Read the Codebase Patterns section in progress.txt before starting
+- Never commit ralph files

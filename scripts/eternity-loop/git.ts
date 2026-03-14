@@ -21,22 +21,13 @@ export async function ensureMainBranch(workDir: string): Promise<void> {
 export async function checkoutBranch(workDir: string, branch: string): Promise<void> {
   await $`git -C ${workDir} fetch origin`.quiet();
 
-  // Try checking out existing branch first, create from remote if available
+  // Force-create (or reset) the local branch to match the remote, then check it out.
+  // Using -B avoids errors when the branch already exists (e.g. checked out in another worktree).
   try {
-    await $`git -C ${workDir} checkout ${branch}`.quiet();
+    await $`git -C ${workDir} checkout -B ${branch} origin/${branch}`.quiet();
   } catch {
-    try {
-      await $`git -C ${workDir} checkout -b ${branch} origin/${branch}`.quiet();
-    } catch {
-      await $`git -C ${workDir} checkout -b ${branch}`;
-    }
-  }
-
-  // Pull latest from origin if the remote branch exists
-  try {
-    await $`git -C ${workDir} reset --hard origin/${branch}`.quiet();
-  } catch {
-    // Remote branch may not exist yet for new branches
+    // Remote branch doesn't exist yet — create a new local branch
+    await $`git -C ${workDir} checkout -B ${branch}`.quiet();
   }
 }
 
@@ -52,8 +43,9 @@ export async function getCurrentBranch(workDir: string): Promise<string> {
 
 export async function getLatestCommitDate(workDir: string, branch?: string): Promise<string> {
   const ref = branch ? `origin/${branch}` : "HEAD";
-  const result = await $`git -C ${workDir} log -1 --format=%ad --date=format-local:%Y-%m-%dT%H:%M:%SZ ${ref}`.text();
-  return result.trim();
+  const result = await $`git -C ${workDir} log -1 --format=%ct ${ref}`.text();
+  const epochSeconds = Number.parseInt(result.trim(), 10);
+  return new Date(epochSeconds * 1000).toISOString();
 }
 
 export async function getLatestCommitMessage(workDir: string, branch?: string): Promise<string> {

@@ -1,6 +1,8 @@
 import type { Octokit } from "@octokit/rest";
 import { graphql } from "@octokit/graphql";
 import { join, basename } from "node:path";
+import { logDebug } from "../logger";
+import { log } from "node:console";
 
 export async function findPrByBranch(
   octokit: Octokit,
@@ -235,6 +237,8 @@ export async function getPrComments(
   const allComments = await fetchAllPrComments(octokit, owner, repo, prNumber);
   const humanComments = allComments.filter((c) => !c.isBot);
 
+  logDebug(`[allComments] Fetched ${allComments.length} total comments (${humanComments.length} human) for PR #${prNumber}, latest cutoff: ${cutoffDate}, latest comment date: ${humanComments.map(c => c.createdAt).sort().reverse()}`);
+
   if (cutoffDate) {
     const cutoff = new Date(cutoffDate);
     const newComments = humanComments.filter((c) => new Date(c.createdAt) > cutoff);
@@ -253,6 +257,7 @@ export async function checkForNewHumanComments(
   latestCommitDate: string,
 ): Promise<boolean> {
   const { new: newComments } = await getPrComments(octokit, owner, repo, prNumber, latestCommitDate);
+  logDebug(`[checkForNewHumanComments] Found ${newComments.length} new human comment(s) since ${latestCommitDate}`);
   return newComments.length > 0;
 }
 
@@ -315,27 +320,19 @@ export function extractScreenshotPaths(progressContent: string, workDir: string)
   return paths;
 }
 
-/**
- * Get the relative path of a file within a git repo.
- */
-async function getRelativePath(workDir: string, absolutePath: string): Promise<string> {
-  // If path is already relative (starts within workDir), extract relative portion
-  if (absolutePath.startsWith(workDir)) {
-    return absolutePath.slice(workDir.length).replace(/^\//, "");
-  }
-  // Otherwise try git to resolve
-  try {
-    const result = await Bun.$`git -C ${workDir} ls-files --full-name ${absolutePath}`.text();
-    return result.trim();
-  } catch {
-    return basename(absolutePath);
-  }
+function getImageMimeType(filePath: string): string | null {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".svg")) return "image/svg+xml";
+  return null;
 }
 
 /**
  * Upload screenshots referenced in progress.txt to the PR as a comment.
- * Screenshots that are committed to the branch are referenced via raw GitHub URLs.
- * Screenshots not yet tracked are committed first, then referenced.
+ * This does not commit files; it only posts screenshots to the PR conversation.
  */
 export async function uploadProgressScreenshots(
   octokit: Octokit,
@@ -344,44 +341,56 @@ export async function uploadProgressScreenshots(
   prNumber: number,
   progressContent: string,
   workDir: string,
-  branch: string,
+  _branch: string,
 ): Promise<void> {
   const screenshotPaths = extractScreenshotPaths(progressContent, workDir);
   if (screenshotPaths.length === 0) return;
 
-  const imageEntries: Array<{ name: string; url: string }> = [];
+  const imageEntries: Array<{ name: string; dataUrl: string }> = [];
+  const skippedEntries: string[] = [];
+  const MAX_IMAGE_BYTES = 1_500_000;
 
   for (const filePath of screenshotPaths) {
     const file = Bun.file(filePath);
     if (!(await file.exists())) continue;
 
-    const relativePath = await getRelativePath(workDir, filePath);
     const name = basename(filePath);
-
-    // Check if file is tracked in git
-    try {
-      await Bun.$`git -C ${workDir} ls-files --error-unmatch ${filePath}`.quiet();
-    } catch {
-      // File not tracked - add and commit it
-      try {
-        await Bun.$`git -C ${workDir} add ${filePath}`.quiet();
-        await Bun.$`git -C ${workDir} commit -m ${"chore: add screenshot " + name}`.quiet();
-      } catch {
-        continue; // Skip if we can't commit
-      }
+    const mimeType = getImageMimeType(filePath);
+    if (!mimeType) {
+      skippedEntries.push(`${name} (unsupported image type)`);
+      continue;
     }
 
-    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${relativePath}`;
-    imageEntries.push({ name, url: rawUrl });
+    const size = file.size;
+    if (typeof size === "number" && size > MAX_IMAGE_BYTES) {
+      skippedEntries.push(`${name} (too large: ${(size / 1024 / 1024).toFixed(2)} MB)`);
+      continue;
+    }
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const base64 = Buffer.from(arrayBuffer).toString("base64");
+      const dataUrl = `data:${mimeType};base64,${base64}`;
+      imageEntries.push({ name, dataUrl });
+    } catch {
+      skippedEntries.push(`${name} (failed to read file)`);
+      continue;
+    }
   }
 
-  if (imageEntries.length === 0) return;
+  if (imageEntries.length === 0 && skippedEntries.length === 0) return;
 
   const body = [
     `🤖 **eternity-loop bot:** Screenshots from this run:\n`,
     ...imageEntries.map((entry, i) =>
-      `### Screenshot ${i + 1}\n![${entry.name}](${entry.url})\n`
+      `### Screenshot ${i + 1}\n![${entry.name}](${entry.dataUrl})\n`
     ),
+    ...(skippedEntries.length > 0
+      ? [
+        "### Skipped files",
+        ...skippedEntries.map((entry) => `- ${entry}`),
+      ]
+      : []),
   ].join("\n");
 
   await postPrComment(octokit, owner, repo, prNumber, body);

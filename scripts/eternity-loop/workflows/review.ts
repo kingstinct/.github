@@ -33,12 +33,16 @@ export class ReviewWorkflow implements Workflow {
     });
 
     const candidates = [...inReview, ...inProgress];
+    logDebug(`[review] Found ${candidates.length} candidate(s) in "In Review" or "In Progress" with prd label`);
     const octokit = createGitHubClient();
     const { owner, repo } = await getRepoInfo(ctx.workDir);
+
+    logDebug(`[review] Checking candidates for new PR comments since last commit in ${owner}/${repo}...`);
 
     let commentCount = 0;
     for (const issue of candidates) {
       const pr = await findPrByBranch(octokit, owner, repo, issue.branchName);
+      logDebug(`[review] Checking issue ${issue.identifier} (branch: ${issue.branchName}) - found PR: ${pr ? pr.number : "none"}`);
       if (!pr) continue;
 
       const latestCommitDate = await getLatestCommitDate(ctx.workDir, issue.branchName);

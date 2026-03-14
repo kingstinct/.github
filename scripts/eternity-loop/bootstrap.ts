@@ -37,27 +37,36 @@ export async function bootstrap(args: string[]): Promise<void> {
 
   // Remove existing worktree
   try {
-    await $`git worktree remove --force ${worktreePath}`.quiet();
+    await $`git -C ${repoRoot} worktree remove --force --force ${worktreePath}`.quiet();
   } catch {
-    try {
-      await $`rm -rf ${worktreePath}`.quiet();
-    } catch {
-      // Already gone
-    }
+    // Continue with hard cleanup below.
+  }
+
+  // Clear stale worktree metadata and path left by interrupted runs.
+  try {
+    await $`git -C ${repoRoot} worktree prune --expire now`.quiet();
+  } catch {
+    // Best effort
+  }
+
+  try {
+    await $`rm -rf ${worktreePath}`.quiet();
+  } catch {
+    // Already gone
   }
 
   // Create fresh worktree detached on origin/main
   await $`mkdir -p ${dirname(worktreePath)}`;
-  await $`git fetch origin`.quiet();
+  await $`git -C ${repoRoot} fetch origin`.quiet();
 
   let mainRef = "origin/main";
   try {
-    await $`git rev-parse --verify origin/main`.quiet();
+    await $`git -C ${repoRoot} rev-parse --verify origin/main`.quiet();
   } catch {
     mainRef = "origin/master";
   }
 
-  await $`git worktree add ${worktreePath} --detach ${mainRef}`;
+  await $`git -C ${repoRoot} worktree add --force ${worktreePath} --detach ${mainRef}`;
 
   spinner.stop();
 
