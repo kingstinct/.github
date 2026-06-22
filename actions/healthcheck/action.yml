@@ -22,7 +22,7 @@ runs:
   using: 'composite'
   steps:
     - name: Check the deployed service URL
-      uses: jtalk/url-health-check-action@v4
+      uses: jtalk/url-health-check-action@b716ccb6645355dd9fcce8002ce460e5474f7f00 # v4
       with:
         url: ${{ inputs.url }}
         max-attempts: ${{ inputs.max-attempts }}
@@ -30,7 +30,7 @@ runs:
         retry-all: true
 
     - name: Notify on failure
-      uses: sarisia/actions-status-discord@v1
+      uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
       if: ${{ failure() && inputs.discord-webhook != '' }}
       with:
         webhook: ${{ inputs.discord-webhook }}
