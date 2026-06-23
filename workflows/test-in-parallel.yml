@@ -93,29 +93,29 @@ jobs:
       test-chunk-ids: ${{ steps['set-test-chunk-ids'].outputs['test-chunk-ids'] }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: cardinalby/export-env-action@v2
+      - uses: cardinalby/export-env-action@4f48c4676cf6ed6f46e30899ee987ce695da7c80 # 2.2.3
         if: ${{ inputs.env_file }}
         with:
           envFile: ${{ inputs.env_file }}
 
-      - uses: pnpm/action-setup@v3
+      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
         if: ${{ inputs.package_manager == 'pnpm' }}
         with:
           version: ${{ inputs.pnpm_version }}
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         if: ${{ inputs.package_manager == 'bun' }}
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: ${{ env.ACT && inputs.package_manager != 'bun' }}
         with:
           node-version-file: .nvmrc
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: ${{ !env.ACT && inputs.package_manager != 'bun' }}
         with:
           node-version-file: .nvmrc
@@ -152,31 +152,31 @@ jobs:
         chunk: ${{ fromJson(needs.setup.outputs['test-chunk-ids']) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: pnpm/action-setup@v3
+      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
         if: ${{ inputs.package_manager == 'pnpm' }}
         with:
           version: ${{ inputs.pnpm_version }}
 
-      - uses: cardinalby/export-env-action@v2
+      - uses: cardinalby/export-env-action@4f48c4676cf6ed6f46e30899ee987ce695da7c80 # 2.2.3
         if: ${{ inputs.env_file }}
         with:
           envFile: ${{ inputs.env_file }}
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         if: ${{ inputs.package_manager == 'bun' }}
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: ${{ env.ACT && inputs.package_manager != 'bun' }}
         with:
           node-version-file: .nvmrc
 
       - name: Setup Node and Cache
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: ${{ !env.ACT && inputs.package_manager != 'bun' }}
         with:
           node-version-file: .nvmrc
@@ -191,11 +191,11 @@ jobs:
         if: ${{ inputs.package_manager != 'npm' }}
 
       - name: Install 1Password CLI
-        uses: 1password/install-cli-action@v1
+        uses: 1password/install-cli-action@143a85f84a90555d121cde2ff5872e393a47ab9f # v1.0.0
         if: ${{ inputs.op_setup_script }}
 
       - name: Load secret
-        uses: 1password/load-secrets-action/configure@v2
+        uses: 1password/load-secrets-action/configure@581a835fb51b8e7ec56b71cf2ffddd7e68bb25e0 # v2.0.0
         if: ${{ inputs.op_setup_script }}
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
@@ -211,10 +211,10 @@ jobs:
           CHUNKS: ${{ needs.setup.outputs['test-chunks'] }}
           NODE_OPTIONS: --max-old-space-size=4096
 
-      - uses: sarisia/actions-status-discord@v1
+      - uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
         if: ${{ failure() && env.DISCORD_WEBHOOK }}
         with:
           webhook: ${{ env.DISCORD_WEBHOOK }}
 
-      - uses: rtCamp/action-slack-notify@v2
+      - uses: rtCamp/action-slack-notify@33ca3be66c6f378fe1610fd1d5258632dbed5e58 # v2.4.0
         if: ${{ failure() && env.SLACK_WEBHOOK }}

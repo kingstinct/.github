@@ -44,7 +44,7 @@ runs:
   using: 'composite'
   steps:
     - name: Setup Bun
-      uses: oven-sh/setup-bun@v2
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       with:
         bun-version: ${{ inputs.bun-version }}
 
@@ -99,7 +99,7 @@ runs:
         CAPROVER_PASSWORD: ${{ inputs.caprover-password }}
 
     - name: Notify on failure
-      uses: sarisia/actions-status-discord@v1
+      uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
       if: ${{ failure() && inputs.discord-webhook != '' }}
       with:
         webhook: ${{ inputs.discord-webhook }}
