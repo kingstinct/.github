@@ -30,8 +30,7 @@ on:
       pnpm_version:
         required: false
         type: string
-        default: "8"
-        description: If using pnpm - which version to use
+        description: If using pnpm - which version to use (defaults to the packageManager field in package.json)
       env_file:
         required: false
         type: string
@@ -65,8 +64,7 @@ on:
       pnpm_version:
         required: false
         type: string
-        default: "8"
-        description: If using pnpm - which version to use
+        description: If using pnpm - which version to use (defaults to the packageManager field in package.json)
       op_setup_script:
         required: false
         type: string
@@ -100,7 +98,7 @@ jobs:
         with:
           envFile: ${{ inputs.env_file }}
 
-      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         if: ${{ inputs.package_manager == 'pnpm' }}
         with:
           version: ${{ inputs.pnpm_version }}
@@ -155,7 +153,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         if: ${{ inputs.package_manager == 'pnpm' }}
         with:
           version: ${{ inputs.pnpm_version }}
