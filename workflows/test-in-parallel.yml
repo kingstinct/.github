@@ -93,7 +93,7 @@ jobs:
       test-chunk-ids: ${{ steps['set-test-chunk-ids'].outputs['test-chunk-ids'] }}
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: cardinalby/export-env-action@4f48c4676cf6ed6f46e30899ee987ce695da7c80 # 2.2.3
         if: ${{ inputs.env_file }}
@@ -152,7 +152,7 @@ jobs:
         chunk: ${{ fromJson(needs.setup.outputs['test-chunk-ids']) }}
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3.0.0
         if: ${{ inputs.package_manager == 'pnpm' }}
