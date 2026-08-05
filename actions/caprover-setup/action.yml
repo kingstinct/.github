@@ -39,6 +39,10 @@ inputs:
     description: 'Bun version to use'
     required: false
     default: '1.3.8'
+  caprover-version:
+    description: 'CapRover CLI version. Pinned — 2.4.0 crashes on startup (see below)'
+    required: false
+    default: '2.3.1'
 
 runs:
   using: 'composite'
@@ -51,7 +55,7 @@ runs:
     - name: Create CapRover App
       shell: bash
       run: |
-        bunx caprover api \
+        bunx caprover@${{ inputs.caprover-version }} api \
           --path=/user/apps/appDefinitions/register \
           --method=POST \
           --data='{"appName":"${{ inputs.caprover-app }}","hasPersistentData":false}' || true
@@ -73,7 +77,7 @@ runs:
           --argjson envVars "$ENV_VARS_ESCAPED" \
           '$ARGS.named')
 
-        bunx caprover api \
+        bunx caprover@${{ inputs.caprover-version }} api \
           --path=/user/apps/appDefinitions/update \
           --method=POST \
           --data="$PAYLOAD"
@@ -90,7 +94,7 @@ runs:
       if: ${{ inputs.enable-ssl == 'true' }}
       shell: bash
       run: |
-        bunx caprover api \
+        bunx caprover@${{ inputs.caprover-version }} api \
           --path=/user/apps/appDefinitions/enablebasedomainssl \
           --method=POST \
           --data='{"appName":"${{ inputs.caprover-app }}"}'

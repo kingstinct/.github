@@ -80,8 +80,35 @@ Deploys a Docker image to CapRover.
     caprover-password: ${{ secrets.CAPROVER_PASSWORD }}
     caprover-app: 'my-app'
     image-name: 'ghcr.io/kingstinct/my-app:${{ github.sha }}'
-    bun-version: '1.3.8'  # optional
+    bun-version: '1.3.8'       # optional
+    caprover-version: '2.3.1'  # optional, see below
 ```
+
+#### Why `caprover-version` is pinned
+
+`caprover@2.4.0` (2026-08-05, first release since 2.3.1 in July 2024) bumped `commander`
+from `^2.20.0` to `^12.1.0`. The `deploy` command has always registered `-t` twice — for both
+`--tarFile` and `--appToken` — which commander 2 tolerated and commander 12 rejects. The CLI
+now throws while building its own command table, before parsing any arguments, so *every*
+subcommand fails, not just `deploy`:
+
+```
+Error: Cannot add option '-t, --appToken <value>' to command 'deploy'
+due to conflicting flag '-t' -  already used by option '-t, --tarFile <value>'
+```
+
+There's no argument-level workaround — the conflict is in caprover's own command
+definitions, so it needs an upstream release. Both `caprover-deploy` and `caprover-setup`
+default to `2.3.1`.
+
+To check whether a newer release is fixed:
+
+```sh
+bunx caprover@latest deploy --help
+```
+
+Prints help → fixed, and consumers can try it with `caprover-version: 'latest'` before the
+defaults here are raised. Throws the `conflicting flag '-t'` error → still broken.
 
 ### Health Check
 
