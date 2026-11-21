@@ -43,8 +43,11 @@ runs:
 
     - name: Deploy to CapRover
       shell: bash
-      run: bunx caprover deploy
+      # Retries while CapRover is busy, e.g. still building the previous deploy
+      run: |
+        "$RETRY" bunx caprover deploy
       env:
+        RETRY: ${{ github.action_path }}/../../scripts/caprover-retry.sh
         CAPROVER_URL: ${{ inputs.caprover-url }}
         CAPROVER_PASSWORD: ${{ inputs.caprover-password }}
         CAPROVER_IMAGE_NAME: ${{ inputs.image-name }}

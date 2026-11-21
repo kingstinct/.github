@@ -51,11 +51,14 @@ runs:
     - name: Create CapRover App
       shell: bash
       run: |
-        bunx caprover api \
+        "$RETRY" bunx caprover api \
           --path=/user/apps/appDefinitions/register \
           --method=POST \
-          --data='{"appName":"${{ inputs.caprover-app }}","hasPersistentData":false}' || true
+          --data='{"appName":"${{ inputs.caprover-app }}","hasPersistentData":false}'
       env:
+        RETRY: ${{ github.action_path }}/../../scripts/caprover-retry.sh
+        # Re-running setup for an existing app is fine
+        CAPROVER_RETRY_OK: App Name already exists
         CAPROVER_URL: ${{ inputs.caprover-url }}
         CAPROVER_PASSWORD: ${{ inputs.caprover-password }}
 
@@ -73,11 +76,12 @@ runs:
           --argjson envVars "$ENV_VARS_ESCAPED" \
           '$ARGS.named')
 
-        bunx caprover api \
+        "$RETRY" bunx caprover api \
           --path=/user/apps/appDefinitions/update \
           --method=POST \
           --data="$PAYLOAD"
       env:
+        RETRY: ${{ github.action_path }}/../../scripts/caprover-retry.sh
         CAPROVER_URL: ${{ inputs.caprover-url }}
         CAPROVER_PASSWORD: ${{ inputs.caprover-password }}
         APP_NAME: ${{ inputs.caprover-app }}
@@ -90,11 +94,12 @@ runs:
       if: ${{ inputs.enable-ssl == 'true' }}
       shell: bash
       run: |
-        bunx caprover api \
+        "$RETRY" bunx caprover api \
           --path=/user/apps/appDefinitions/enablebasedomainssl \
           --method=POST \
           --data='{"appName":"${{ inputs.caprover-app }}"}'
       env:
+        RETRY: ${{ github.action_path }}/../../scripts/caprover-retry.sh
         CAPROVER_URL: ${{ inputs.caprover-url }}
         CAPROVER_PASSWORD: ${{ inputs.caprover-password }}
 
